@@ -1,0 +1,30 @@
+# GUI 检测器默认参数；运行中修改界面参数后需点击“应用”。
+# 修改本文件后重新启动 GUI/创建检测器生效；不会热更新已经打开的模型实例。
+# benchmark 默认读取本文件；--detector-config 可指定其他检测器配置。
+# benchmark 的 --config 指定双目配置，不是本文件。
+
+# 最多检测的手数；双手场景通常保留 2，增大可能增加计算量和错误候选。
+algorithm: mediapipe
+num_hands: 2
+# RTMDet 手框分数 / RTMPose 关节分数（仅 RTMPose 使用）。
+box_threshold: 0.3
+keypoint_threshold: 0.3
+# 检测阶段的分数阈值；降低通常提高召回，也可能增加误检，不是三维质量阈值。
+min_hand_detection_confidence: 0.2
+# 关键点模型判断“手仍存在”的分数阈值；降低可能保留不可靠的关键点。
+min_hand_presence_confidence: 0.5
+# 视频跟踪阶段的分数阈值；IMAGE 模式不能把它当成跨帧身份恢复开关。
+min_tracking_confidence: 0.5
+
+# 官方 MediaPipe Tasks 模型路径，相对于项目根目录；不是算法调参项。
+model_path: models/hand_landmarker.task
+
+# 全图完全漏检时，用同一模型/相同阈值对四个固定重叠区域重试。
+# 不用 GT 框，先还原整图坐标再做 HOT3D 旋转/相机映射；有检测的全图不重试。
+# 此段由检测器直接读取，GUI 和 benchmark 均生效；修改后需重建检测器。
+rescue:
+  enabled: true
+  crop_fraction: 0.65 # 每块占原图宽/高的比例；四角裁剪互相重叠，避免边界切断手。
+  duplicate_distance_fraction: 0.25 # 同索引像素中位距离 / 手框对角线的去重门限。
+  min_inside_joints: 16 # 至少多少个点在裁剪范围内，防止接受大部分被切断的局部手。
+  min_image_side_px: 128 # 较小输入不再裁成更小块，保留全图检测结果。

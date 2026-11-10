@@ -1,0 +1,24 @@
+# VS030 实时 VIO 的相机—IMU 对齐设置（2026-11-10 修正）。
+# 实测结论：IMU 物理采样与相机严格 16:1（480 Hz / 30 Hz）；驱动时间戳由 IMU 内部
+# RC 计数器按标称 480 Hz 合成，相对真实时间有 ~0.2-0.3% 误差，因此“用时间戳对齐”
+# 会表现为随时间增长的假漂移。正确做法是忽略时间戳、按帧格点计数重采样（与厂商
+# MCAP 的 exposure_start + i*T/N 一致）。
+# 用 480.0 Hz 格点重放 8 分钟数据：各 10 s 窗最佳时延恒为 -40 ms（斜率 0.02 ms/s）；
+# 479.5/481.2 Hz 分别产生 +1.05 / -2.59 ms/s 的假漂移。
+#
+# imu_alignment: lattice | timestamp
+#   lattice   —— 按 IMU UDP 包头 device_ts 锚定到相机时间轴
+#   timestamp —— 旧驱动时间戳对照模式，固定偏移无法抵消累计漂移
+# imu_rate_hz —— 物理采样率（相机时间轴），实测 480.0
+# camera_to_imu_drift_ppm —— 相对 480 的修正；当前测量为 0。若换设备/固件，
+#   用 scripts/analyze_vs030_lag_capture.py + 速率扫描重新标定。
+imu_alignment: lattice
+lattice_reference: packet      # count 可复现旧的首帧计数方案
+lattice_phase_ms: 97.0         # 样本时间 = 包头 + 相位 + 包内格点；三段旋转录制实测
+camera_to_imu_lag_ms: -85.0
+imu_rate_hz: 480.0
+camera_to_imu_drift_ppm: 0.0
+# 实时性能：ORB 输入缩放到 0.5（800x600）并配套半分辨率配置；
+# 实测单帧 97 ms -> 37 ms，跟踪率不变。
+image_scale: 0.5
+orb_config: configs/vio/vs030_rectified_half.yaml

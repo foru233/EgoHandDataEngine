@@ -1,0 +1,65 @@
+# 双目重建主要调试参数；EgoHandEngine 默认从此文件读取。
+# 修改后重新启动采集/重建引擎生效；已有录制保留当时的配置快照。
+# 当前只整理顺序和注释，所有默认数值与之前保持一致。
+
+# ── 1. 优先调试：左右手匹配与歧义拒绝 ──
+# 每一侧选择“不匹配”的代价，无量纲；增大通常更倾向于配对，减小更容易不匹配。
+# 一对左右手都放弃匹配会分别付出代价，合计 2 * unmatched_cost。
+# 几何硬门控已拒绝的候选不会因该值增大而恢复有效。
+unmatched_cost: 4.0
+# 最佳全局分配与替代分配的最小代价差；越大越保守，越容易判为歧义。
+# 左右立体关联、跨帧 track 身份分配都会读取该参数；它不是置信概率。
+ambiguity_margin: 0.15
+# 候选手至少需要多少个有效三维关节才允许配对/跟踪，计数单位为“个”。
+min_valid_joints: 8
+
+# VS030 近距离参数（极线误差，校正图 px）。
+# 仅在 VS030 GUI 实时采集中覆盖下面的通用值；实测标定和近距模型误差仍需进一步评估。
+vs030_max_epipolar_px: 5.0
+
+# 各项为代价权重，越大表示越惩罚对应的不一致；不同分量并非概率。
+weights:
+  epipolar: 1.0     # 有效关节的中位极线误差 / max_epipolar_px。
+  handedness: 0.3  # 左右视图手侧标签冲突的软惩罚，允许模型偶发报错标签。
+  temporal: 0.7    # 候选三维中心与历史轨迹距离的归一化惩罚。
+  geometry: 1.0    # 有效关节覆盖损失：1 - 有效关节数 / 21。
+  disparity: 1.0   # 旧配置兼容项，当前不参与加权；视差仍由下面的硬门控检查。
+
+# ── 2. 几何有效性：像素误差、深度与同步 ──
+# 以下像素阈值针对校正后的左右关键点；增大通常保留更多点，也可能放过错配。
+use_epipolar_error: true  # 是否将极线误差用于关节拒绝、匹配代价和几何质量分；仍会计算并显示误差。
+use_reprojection_error: true # 关闭时仍计算误差，但不以重投影误差拒绝或计入质量分。
+vs030_user_confirmed_sync: true # 用户已确认设备同步；按同一完整数据包组配对，不伪造曝光时间戳。
+enable_3d_tracking: true # 三维跨帧身份跟踪；关闭后逐帧重建，不沿用历史 ID。
+max_epipolar_px: 3.0      # 最大极线误差，px；水平双目比较纵坐标，垂直双目比较横坐标。
+max_reprojection_px: 3.0 # 左右重投影误差的较大值上限，px；很小也不等于三维准确。
+min_disparity_px: 0.25   # 最小绝对视差，px；增大可拒绝低视差，但会损失远处关节。
+min_depth_m: null        # null 表示不按距离设置下限；仍检查两相机正深度。
+max_depth_m: null        # null 表示不按距离设置上限；仍检查视差、极线及重投影。
+# HOT3D 在虚拟左光学坐标中执行上述门控，最终导出再转回原生左相机，二者 Z 不应混用。
+max_sync_error_ms: 5.0   # 已提供左右时间戳时的软件容差，ms；不是实测硬件同步精度。
+
+# ── 3. 骨架结构与跨帧跟踪 ──
+min_bone_m: 0.001        # 相邻关节允许的最短骨长，m；过短拒绝子关节。
+max_bone_m: 0.15         # 相邻关节允许的最长骨长，m；过长拒绝子关节。
+max_speed_m_s: 4.0       # 允许的关节/中心运动速度，m/s；与帧间 dt 一起形成位移上限。
+temporal_slack_m: 0.03   # 运动上限之外的固定位移余量，m；并非平滑滤波系数。
+track_timeout_s: 0.5     # 保留失联轨迹的最长时间，s；超时后重新出现会新建 ID。
+reacquisition_gap_s: 0.1 # 超过此间隔，不能仅靠最近邻恢复旧 ID，还要检查历史与姿态。
+reacquisition_pose_rms_m: 0.03 # 去除平移后，共同有效关节姿态 RMS 允许值，m。
+reacquisition_prediction_m: 0.05 # 旧轨迹速度外推中心与新中心的最大残差，m。
+
+# ── 4. 三维不确定性：先诊断，再考虑正式拒绝 ──
+uncertainty:
+  enabled: true
+  mode: diagnostic          # diagnostic：只输出诊断；reject：额外拒绝高不确定性点。
+  assumed_pixel_std: 1.5    # 假定校正后每维像素噪声标准差，px；不是 MediaPipe 实测误差。
+  method: numerical_jacobian # 当前支持数值 Jacobian 传播，不对所有相机套平行双目简式。
+  max_depth_std_m: 0.03     # reject 模式下 Z 标准差上限，m；默认诊断模式不据此拒绝。
+  max_position_std_m: 0.03  # reject 模式下最大协方差主轴标准差上限，m；不是平均位置误差。
+  reject_unavailable: true  # reject 模式下，无法计算不确定性时是否也拒绝。
+
+  # 数值计算参数：通常最后再调；不稳定时返回不可用状态，而不是假定为零误差。
+  jacobian_step_px: 0.01    # 中心差分步长，px；同时用半步长验证稳定性。
+  stability_rtol: 0.02      # 两种步长得到的 Jacobian 相对差容差，无量纲。
+  max_jacobian_condition: 100000000.0 # Jacobian 奇异值条件数上限，无量纲。

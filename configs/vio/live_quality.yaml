@@ -1,0 +1,7 @@
+# 实时位姿质量门控；仅在连续跟踪并完成 IMU 初始化后显示结果。
+# 不限制空间位置或相机与物体的距离。超限会标记异常并重新等待稳定，不修改原始位姿。
+stable_seconds: 1.5
+max_translation_speed_mps: 1.5
+translation_noise_allowance_m: 0.02
+max_rotation_speed_deg_s: 360.0
+rotation_noise_allowance_deg: 3.0

@@ -1,0 +1,2 @@
+# VS030 NET 双路 H.265 被动预览；平台工具位于 tools/android/platform-tools。
+av==19.0.2

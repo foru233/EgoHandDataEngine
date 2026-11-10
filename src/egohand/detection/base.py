@@ -1,0 +1,6 @@
+from typing import Protocol
+from ..core.types import HandDetection
+
+class HandDetector(Protocol):
+    def detect(self,image,timestamp_ns=0) -> list[HandDetection]: ...
+    def close(self) -> None: ...

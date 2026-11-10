@@ -1,0 +1,12 @@
+# MANO 拟合参数：距离单位为米；这些阈值独立于双目极线和重投影误差开关。
+min_joints: 8
+min_fingers: 2
+max_fit_error_m: 0.035
+iterations: 100
+learning_rate: 0.035
+pose_prior_weight: 0.00001
+shape_prior_weight: 0.00002
+temporal_weight: 0.00001
+temporal_max_frame_gap: 8
+python: ""  # 鍙€夛細鎸囧悜宸插畨瑁?PyTorch/smplx 鐨勮В閲婂櫒锛屼緥濡?C:/path/to/python-with-torch/python.exe
+models: models/mano

@@ -1,0 +1,76 @@
+# ============================================================
+# EgoHand Data Engine .gitignore
+# 只提交源码 / 文档 / 配置 / 测试；不提交依赖、数据、模型、第三方代码与运行产物。
+# ============================================================
+
+# ---------- Python 环境与缓存 ----------
+/.venv/
+/venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ---------- IDE / 操作系统 ----------
+/.idea/
+/.run/
+/.vscode/
+Thumbs.db
+Desktop.ini
+.DS_Store
+*.bak
+*.tmp
+*.swp
+~$*
+
+# ---------- 环境变量与凭据（示例文件可提交） ----------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.pfx
+*.p12
+*.jks
+
+# ---------- 运行产物 / 本地数据（仅仓库根目录） ----------
+/logs/
+/recordings/
+/exports/
+/results/
+/benchmark-results/
+/data/
+/datasets/
+/build/
+/dist/
+*.log
+pytest.xml
+
+# ---------- 外部上游代码、vendored 依赖与厂商交付物 ----------
+# third_party/manopth 与 third_party/ORB_SLAM3 为 GPL-3.0；
+# tools/show3d 为 CC BY-NC 4.0；SDK/ 为厂商专有交付包，均不随仓库分发。
+/third_party/
+/tools/
+/SDK/
+/handoff/
+
+# ---------- 大体积二进制、模型与数据集 ----------
+models/*.task
+models/*.onnx
+models/mano/
+src/**/native/bin/
+*.pdb
+*.dll
+*.so
+*.dylib
+*.exe
+*.pdf
+samples/date/
+samples/public/hand.jpg
+
+# ---------- 内部文档 ----------
+*.docx

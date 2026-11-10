@@ -1,0 +1,34 @@
+{
+  "schema_version": "1.0.0",
+  "metadata": {
+    "source_type": "synthetic",
+    "real_stereo": false,
+    "synchronized": true,
+    "real_calibration": false,
+    "metric_capable": true,
+    "contains_imu": false,
+    "ground_truth": true,
+    "synthetic": true,
+    "synchronization_evidence": "synthetic_projection",
+    "timestamp_kind": "synthetic",
+    "extra": {
+      "scenario": "different_depth",
+      "fps": 30,
+      "frame_count": 12
+    }
+  },
+  "algorithm_config": {
+    "scenario": "different_depth",
+    "seed": 42
+  },
+  "model": {},
+  "recording_status": "complete",
+  "raw_count": 12,
+  "result_count": 0,
+  "calibration": "calibration.yaml",
+  "image_geometry": "raw",
+  "raw_index": "raw/frames.jsonl",
+  "result_index": "results/frames.jsonl",
+  "created_time_ns": 1793670952128050700,
+  "incomplete_reason": null
+}

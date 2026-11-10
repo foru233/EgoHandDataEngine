@@ -1,0 +1,9 @@
+{
+  "url": "https://mediapipe-models.storage.googleapis.com/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+  "canonical_url": "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+  "model": "Hand Landmarker float16 version 1",
+  "sha256": "fbc2a30080c3c557093b5ddfc334698132eb341044ccee322ccf8bcf3607cde1",
+  "size_bytes": 7819105,
+  "downloaded_at": "2026-11-03T01:47:49.137867+00:00",
+  "license_reference": "https://developers.google.com/edge/mediapipe/solutions/vision/hand_landmarker#models"
+}

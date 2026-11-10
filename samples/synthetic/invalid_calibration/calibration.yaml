@@ -1,0 +1,53 @@
+K_left:
+- - 600.0
+  - 0.0
+  - 320.0
+- - 0.0
+  - 600.0
+  - 240.0
+- - 0.0
+  - 0.0
+  - 1.0
+D_left:
+- 0.0
+- 0.0
+- 0.0
+- 0.0
+- 0.0
+K_right:
+- - 600.0
+  - 0.0
+  - 320.0
+- - 0.0
+  - 600.0
+  - 240.0
+- - 0.0
+  - 0.0
+  - 1.0
+D_right:
+- 0.0
+- 0.0
+- 0.0
+- 0.0
+- 0.0
+R_right_left:
+- - 1.0
+  - 0.0
+  - 0.0
+- - 0.0
+  - 1.0
+  - 0.0
+- - 0.0
+  - 0.0
+  - 1.0
+t_right_left:
+- 0.0
+- 0.0
+- 0.0
+image_width: 640
+image_height: 480
+distortion_model: pinhole
+calibration_id: synthetic-640-v1
+calibration_source: synthetic
+translation_unit: m
+synthetic: true
