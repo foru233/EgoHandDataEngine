@@ -200,3 +200,44 @@ def test_vio_environment_identity_includes_mode_policy():
 
     assert _environment_identity({'EGOHAND_VIO_DISABLE_RECOVERY': '0'}) != _environment_identity(
         {'EGOHAND_VIO_DISABLE_RECOVERY': '1'})
+
+
+def test_live_worker_rebuilds_child_when_recovery_file_changes(tmp_path, monkeypatch):
+    from egohand.vio import live_runtime
+
+    settings = tmp_path / 'settings.yaml'
+    settings.write_text('Camera.fps: 30\n', encoding='utf8')
+    library = tmp_path / 'candidate.dll'
+    library.write_bytes(b'candidate')
+    recovery = tmp_path / 'recovery.yaml'
+    recovery.write_text('short_recovery: true\n', encoding='utf8')
+    monkeypatch.setattr(live_runtime, 'PYTHON', tmp_path / 'python.exe')
+    monkeypatch.setattr(live_runtime, 'apply_mode_environment', lambda env, _mode: env)
+    monkeypatch.setattr(live_runtime, 'vio_subprocess_environment', lambda **_kwargs: {
+        'EGOHAND_VIO_RECOVERY_CONFIG': str(recovery),
+        'EGOHAND_VIO_RECOVERY_PROTOCOL': '2',
+    })
+    from egohand.vio import library_manifest
+    monkeypatch.setattr(library_manifest, 'select_library', lambda _root: library)
+
+    class Stdin:
+        def __init__(self): self.closed = False
+        def write(self, _payload): return None
+        def flush(self): return None
+        def close(self): self.closed = True
+
+    class Proc:
+        def __init__(self): self.stdin = Stdin(); self.closed = False
+        def poll(self): return None
+        def wait(self, timeout=None): self.closed = True
+        def kill(self): self.closed = True
+
+    created = []
+    monkeypatch.setattr(live_runtime.subprocess, 'Popen', lambda *args, **kwargs: created.append(Proc()) or created[-1])
+    worker = live_runtime.LiveVioWorker()
+    worker.request_session(1234, settings, 'first')
+    assert len(created) == 1
+    recovery.write_text('short_recovery: false\n', encoding='utf8')
+    _, reused, _ = worker.request_session(1234, settings, 'second')
+    assert not reused and len(created) == 2 and created[0].closed
+    worker.close()
