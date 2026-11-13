@@ -201,6 +201,18 @@ def test_iter_paired_frames_pairs_sequence_and_equal_device_ts(tmp_path):
 
     assert [frame.sequence for frame in iter_paired_frames(root, limit=2)] == [1, 2]
 
+    selected_stats = {}
+    selected = list(iter_paired_frames(root, stats=selected_stats, stride=2))
+    assert [frame.index for frame in selected] == [0, 2]
+    assert selected_stats['paired_frames'] == 3
+    for actual, expected in zip(selected, frames[::2]):
+        assert actual.sequence == expected.sequence and actual.device_ts == expected.device_ts
+        assert np.array_equal(actual.left_bgr, expected.left_bgr)
+        assert np.array_equal(actual.right_bgr, expected.right_bgr)
+    assert [frame.index for frame in iter_paired_frames(root, limit=1, stride=2)] == [0]
+    with pytest.raises(ValueError):
+        list(iter_paired_frames(root, stride=0))
+
 
 class _FakeFrame:
     def __init__(self, value):
@@ -223,6 +235,29 @@ class _FakeDecoder:
 
     def decode(self, packet):
         return self._map.get(bytes(packet), [])
+
+
+def test_stride_decodes_every_packet_but_converts_only_selected_pairs(tmp_path, monkeypatch):
+    import av
+    records = [(sink, seq, 100 + seq, 0, 0, b'L' if sink == 4 else b'R')
+               for seq in range(5) for sink in (4, 5)]
+    root = _build_recording(tmp_path, records)
+    counts = {'decode': 0, 'convert': 0}
+    original_decode, original_convert = _FakeDecoder.decode, _FakeFrame.to_ndarray
+
+    def decode(self, packet):
+        counts['decode'] += 1
+        return original_decode(self, packet)
+
+    def convert(self, format=None):
+        counts['convert'] += 1
+        return original_convert(self, format=format)
+
+    monkeypatch.setattr(_FakeDecoder, 'decode', decode)
+    monkeypatch.setattr(_FakeFrame, 'to_ndarray', convert)
+    monkeypatch.setattr(av.CodecContext, 'create', staticmethod(lambda *args: _FakeDecoder()))
+    assert [p.index for p in iter_paired_frames(root, stride=2)] == [0, 2, 4]
+    assert counts == {'decode': 10, 'convert': 6}
 
 
 def test_iter_paired_frames_skips_zero_and_two_frame_decodes(tmp_path, monkeypatch):

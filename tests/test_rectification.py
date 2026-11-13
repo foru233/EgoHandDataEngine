@@ -28,6 +28,22 @@ def test_rotated_coordinate_frame(calibration,source):
     np.testing.assert_allclose([j.xyz_m for j in r.hands[0].joints],f.metadata["ground_truth_xyz_m"][0],atol=1e-5)
 
 
+@pytest.mark.parametrize('model', ['pinhole', 'fisheye'])
+def test_preconverted_maps_match_float_maps_pixel_for_pixel(calibration, model):
+    c=replace(calibration,distortion_model=model,D_left=np.array([.02,-.01,0.,0.]),
+              D_right=np.array([-.01,.005,0.,0.]),
+              R_right_left=cv2.Rodrigues(np.array([.015,.025,-.01]))[0])
+    rectifier=StereoRectifier(c)
+    rng=np.random.default_rng(39)
+    left=rng.integers(0,256,(c.image_height,c.image_width,3),dtype=np.uint8)
+    right=rng.integers(0,256,left.shape,dtype=np.uint8)
+    fixed=rectifier.remap_pair(left,right)
+    floating=(cv2.remap(left,*rectifier.maps_left,cv2.INTER_LINEAR),
+              cv2.remap(right,*rectifier.maps_right,cv2.INTER_LINEAR))
+    for actual,expected in zip(fixed,floating):
+        np.testing.assert_array_equal(actual,expected)
+
+
 @pytest.mark.parametrize('model', ['pinhole','fisheye'])
 def test_detection_point_transform_agrees_with_direct_rectification(calibration,model):
     from egohand.core.types import HandDetection

@@ -7,6 +7,15 @@ import cv2
 import numpy as np
 
 
+def _phase_gray_pair(left, right, scale):
+    """Convert rectified BGR inputs to gray and resize only when required."""
+    images = [cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) for image in (left, right)]
+    if scale != 1.0:
+        images = [cv2.resize(image, None, fx=scale, fy=scale,
+                             interpolation=cv2.INTER_AREA) for image in images]
+    return images
+
+
 def rotation_errors(samples, times, gyro, camera_from_body, phase_ms):
     """Midpoint SO(3) integration, vectorized over visual frame pairs."""
     anchor = int(times[0])
@@ -160,17 +169,15 @@ def prepare_recording_phase(recording, config, workspace, *, cancelled=None, on_
         camera_to_imu_drift_ppm=float(config.timing.get('camera_to_imu_drift_ppm',0)),phase_ns=0)
     packets=iter(iter_imu_packets(recording));packet=next(packets,None)
     samples=deque(maxlen=150);verification=None
-    for index,frame in enumerate(iter_paired_frames(recording)):
+    for frame in iter_paired_frames(recording, limit=900, stride=2):
+        index=frame.index
         if cancelled is not None and cancelled.is_set():raise InterruptedError('时序核验已取消')
-        if index>=1800:break
-        if index%2:continue
         stamp=int(frame.device_ts)*1000
         while packet is not None and packet.device_ts*1000<=stamp+250_000_000:
             buffer.add(packet.payload,packet.device_ts);packet=next(packets,None)
         while buffer.rows and buffer.rows[0][0]<stamp-15_000_000_000:buffer.rows.popleft()
         left,right=geometry.rectifier.remap_pair(frame.right_bgr,frame.left_bgr)
-        left,right=[cv2.resize(cv2.cvtColor(im,cv2.COLOR_BGR2GRAY),None,fx=scale,fy=scale,
-                              interpolation=cv2.INTER_AREA) for im in (left,right)]
+        left,right=_phase_gray_pair(left,right,scale)
         visual=reference.process(stamp,left,right)
         if visual['valid']:
             samples.append((visual['start_ns'],visual['end_ns'],np.eye(3),

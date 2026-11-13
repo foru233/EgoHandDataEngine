@@ -74,6 +74,19 @@ def test_visual_bootstrap_host_jump_latches_the_same_coordinator_without_imu_anc
     assert later['localization']['state']=='RELOCALIZING'
 
 
+def test_stable_quality_inside_quarantine_cannot_publish_world_pose():
+    c, p, run = fixture(stable=.1)
+    run(frame(1_000_000_000))
+    assert run(frame(1_100_000_000))['pose_valid']
+    c._quarantine('pose_jump', 'unavailable')
+    for t in (1_200_000_000, 1_300_000_000, 1_400_000_000):
+        out = run(frame(t))
+        assert out['quality_gate']['passed'] is True
+        assert out['recovery_preaccept']['await_visual_requalification'] is True
+        assert not out['pose_valid'] and consumer_map_pose(out) is None
+        assert out['localization']['admission']['world_hands_permitted'] is False
+
+
 def test_loss_and_imu_reset_cannot_clear_single_owner_quarantine_but_new_map_is_distinct():
     c,p,run=fixture()
     run(frame(1_000_000_000))

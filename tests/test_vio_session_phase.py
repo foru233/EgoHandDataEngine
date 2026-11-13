@@ -9,6 +9,29 @@ from egohand.vio.config_snapshot import resolve_live_config, resolve_recording_c
 from dataclasses import replace
 
 
+def test_gray_preparation_skips_identity_resize_without_changing_pixels(monkeypatch):
+    from egohand.vio.session_phase import _phase_gray_pair
+    rng = np.random.default_rng(19)
+    left = rng.integers(0, 256, (117, 151, 3), dtype=np.uint8)
+    right = rng.integers(0, 256, left.shape, dtype=np.uint8)
+    old = [cv2.resize(cv2.cvtColor(im, cv2.COLOR_BGR2GRAY), None,
+                      fx=1., fy=1., interpolation=cv2.INTER_AREA) for im in (left, right)]
+    monkeypatch.setattr(cv2, 'resize', lambda *a, **k: pytest.fail('identity resize called'))
+    for actual, expected in zip(_phase_gray_pair(left, right, 1.), old):
+        np.testing.assert_array_equal(actual, expected)
+        assert actual.flags.c_contiguous
+
+
+def test_gray_preparation_retains_nonidentity_resizing():
+    from egohand.vio.session_phase import _phase_gray_pair
+    rng = np.random.default_rng(19)
+    images = [rng.integers(0, 256, (117, 151, 3), dtype=np.uint8) for _ in range(2)]
+    expected = [cv2.resize(cv2.cvtColor(im, cv2.COLOR_BGR2GRAY), None,
+                           fx=.5, fy=.5, interpolation=cv2.INTER_AREA) for im in images]
+    for actual, reference in zip(_phase_gray_pair(*images, .5), expected):
+        np.testing.assert_array_equal(actual, reference)
+
+
 def synthetic_reference(second_phase=37, constant=False):
     anchor=1_794_300_000_000_000_000
     seconds=np.arange(0,8,1/480)

@@ -94,6 +94,24 @@ def test_geometric_release_still_obeys_original_quality_stability_window():
     assert run(frame(1_060_000_000,geometry=True))['pose_valid']
 
 
+def test_geometry_release_after_stable_quarantine_reports_imu_unavailable():
+    c,p,run=system(stable=.1,anchor=False,timeout=5)
+    assert not run(frame(1_000_000_000))['pose_valid']
+    assert run(frame(1_100_000_000))['pose_valid']
+    run(frame(1_110_000_000,state='LOST'))
+    pending=run(frame(1_120_000_000))
+    assert c.quarantined and not pending['pose_valid']
+    stable=run(frame(1_220_000_000))
+    assert stable['quality_gate']['passed'] is True
+    assert c.quarantined and not stable['pose_valid']
+    assert consumer_map_pose(stable,world_hands=True) is None
+    released=run(frame(1_230_000_000,geometry=True))
+    assert released['recovery_preaccept']['visual_release']['motion_check']['status']=='unavailable'
+    assert released['quality_gate']['passed'] is True
+    assert not c.quarantined and released['pose_valid']
+    assert consumer_map_pose(released,world_hands=True) is not None
+
+
 def test_timeout_requests_new_map_once_and_never_releases_old_coordinates():
     c,p,run=system()
     old=run(frame(1_000_000_000));old_segment=old['local_motion']['segment_id']

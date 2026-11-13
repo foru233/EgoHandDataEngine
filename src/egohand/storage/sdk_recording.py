@@ -248,8 +248,12 @@ def _new_stats(stats):
     return stats
 
 
-def iter_paired_frames(root, limit=None, stats=None):
-    """两个常驻 HEVC 解码器顺序消费 sink4/sink5，按 sequence + 相等 device_ts 配对。"""
+def iter_paired_frames(root, limit=None, stats=None, *, stride=1):
+    """Decode all HEVC packets; convert and yield every stride-th paired frame.
+
+    Indices refer to the original paired stream, and limit counts yielded pairs.
+    Skipped pairs still update the decoders and pairing statistics.
+    """
     path = _sdk_records_path(root)
     if not path.is_file():
         raise FileNotFoundError(f"缺少原始 SDK 记录：{path}")
@@ -257,6 +261,8 @@ def iter_paired_frames(root, limit=None, stats=None):
         limit = int(limit)
         if limit <= 0:
             return
+    if type(stride) is not int or stride < 1:
+        raise ValueError('stride must be a positive integer')
 
     import av
 
@@ -272,6 +278,7 @@ def iter_paired_frames(root, limit=None, stats=None):
     decoders = {sink: _create_decoder() for sink in CAMERA_SINKS}
     pending = {}
     produced = 0
+    yielded = 0
     for record in iter_sdk_records(path):
         if record.sink not in CAMERA_SINKS:
             continue
@@ -293,8 +300,16 @@ def iter_paired_frames(root, limit=None, stats=None):
             left_frame, left_record = pair[4]
             right_frame, right_record = pair[5]
             if left_record.device_ts == right_record.device_ts:
+                index = produced
+                produced += 1
+                counters["paired_frames"] = produced
+                if index % stride:
+                    while len(pending) > _PENDING_PAIR_LIMIT:
+                        del pending[next(iter(pending))]
+                        counters["pending_pair_drops"] += 1
+                    continue
                 yield PairedFrame(
-                    index=produced,
+                    index=index,
                     sequence=int(record.sequence),
                     device_ts=int(left_record.device_ts),
                     left_bgr=left_frame.to_ndarray(format="bgr24"),
@@ -304,9 +319,8 @@ def iter_paired_frames(root, limit=None, stats=None):
                     arrival_ts_left_ns=int(left_record.arrival_ts_ns),
                     arrival_ts_right_ns=int(right_record.arrival_ts_ns),
                 )
-                produced += 1
-                counters["paired_frames"] = produced
-                if limit is not None and produced >= limit:
+                yielded += 1
+                if limit is not None and yielded >= limit:
                     return
             else:
                 counters["device_ts_mismatch"] += 1
