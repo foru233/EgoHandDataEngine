@@ -61,10 +61,25 @@ def test_research_gui_exposes_same_v4_profile_choice(qtbot):
     window = MainWindow()
     qtbot.addWidget(window)
     try:
-        assert window.vio_panel.live_profile.findData('v4') >= 0
+        assert window.vio_panel.live_profile.currentData() == 'v4'
         assert window.vio_panel.live_profile.itemText(window.vio_panel.live_profile.findData('v4')) == 'v4 实时恢复实验版'
     finally:
         window.close()
+
+
+def test_research_replay_uses_candidate_profile(monkeypatch):
+    from egohand.gui.main_window import ReplayThread
+    from egohand.vio import replay_runtime
+    seen={}
+    class Replay:
+        def __init__(self,recording,**options):seen.update(options)
+        def run(self):return {'status':'completed'}
+    monkeypatch.setattr(replay_runtime,'ReplayVio',Replay)
+    thread=ReplayThread(ROOT/'data/session_20261112_184714_636910800',candidate=True)
+    thread.run()
+    assert seen['library_path'].name=='egohand_vio_short_recovery_candidate.dll'
+    assert seen['environment']['EGOHAND_VIO_SHORT_RECOVERY']=='1'
+    assert seen['config_snapshot'].image_scale==1.0
 
 
 def test_customer_vio_status_uses_customer_language(qtbot):

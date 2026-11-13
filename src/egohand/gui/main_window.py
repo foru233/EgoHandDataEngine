@@ -39,10 +39,10 @@ class ReplayThread(QThread):
     status=Signal(str)
     finished_ok=Signal(dict)
     failed=Signal(str)
-    def __init__(self,recording,timing=None,stride=1,parent=None):
+    def __init__(self,recording,timing=None,stride=1,parent=None,*,candidate=False):
         super().__init__(parent)
         self.recording=str(recording);self.timing=timing;self.stride=max(1,int(stride))
-        self._runner=None;self._cancel_requested=False
+        self._runner=None;self._cancel_requested=False;self.candidate=bool(candidate)
     def _on_status(self,message):
         if not isinstance(message,dict):return
         text=message.get("message")
@@ -56,7 +56,8 @@ class ReplayThread(QThread):
         if self._cancel_requested:
             self.failed.emit("离线回放已取消");return
         try:
-            self._runner=ReplayVio(self.recording,timing=self.timing,stride=self.stride,on_status=self._on_status)
+            options=LiveRecoveryProfile().recording_options(self.recording) if self.candidate else {}
+            self._runner=ReplayVio(self.recording,timing=None if self.candidate else self.timing,stride=self.stride,on_status=self._on_status,**options)
             if self._cancel_requested:self._runner.cancel()
             report=self._runner.run()
         except Exception as exc:
@@ -297,12 +298,12 @@ class MainWindow(QMainWindow):
                 detector={"model_path":str(self.model_path),**{key:self.detector_config[key] for key in DETECTOR_KEYS}}
             live_vio=isinstance(source,XdSdkStereoSource) and self.vio_panel.live_enabled.isChecked()
             live_profile=None
-            if self.vio_panel.live_profile.currentData()=='v4':
-                if not live_vio:
-                    raise ValueError('v4 实时恢复实验版仅支持 VS030 实时设备')
+            if live_vio and self.vio_panel.live_profile.currentData()=='v4':
                 live_profile=LiveRecoveryProfile()
             preset=(self.vio_panel.map_directory,self.vio_panel.map_manifest,
                     self.vio_panel.map_updates,self.vio_panel.map_comparison) if live_vio and self.vio_panel.map_directory else None
+            if live_profile is not None and preset is not None:
+                raise ValueError('v4 恢复候选不支持预扫地图，请先关闭预扫地图或选择正式稳定版')
             defaults={'use_epipolar_error':False,'use_reprojection_error':False,'enable_3d_tracking':True,'vs030_user_confirmed_sync':False}
             profile_options=live_profile.worker_options() if live_profile is not None else {}
             self.worker=create_worker(source,worker_class=PipelineWorker,config={k:self.stereo_config.get(k,v) for k,v in defaults.items()},detector_config=detector,calibration=profile_options.pop('calibration',self.loaded_calibration),offline=self.source_panel.offline.isChecked(),parent=self,rois=self.roi_panel.settings(),live_vio=live_vio,vio_worker=self.live_vio_worker,preset_map=preset,**profile_options)
@@ -536,7 +537,7 @@ class MainWindow(QMainWindow):
         self.recording_panel.set_replay_running(True)
         self.recording_panel.set_replay_status("离线 VIO 回放启动中…（后台线程，界面可继续操作）")
         self.statusBar().showMessage("离线 VIO 回放启动中："+str(recording))
-        thread=ReplayThread(recording,timing=timing,stride=stride,parent=self)
+        thread=ReplayThread(recording,timing=timing,stride=stride,parent=self,candidate=self.vio_panel.live_profile.currentData()=='v4')
         thread.status.connect(self._on_replay_status)
         thread.finished_ok.connect(self._on_replay_finished)
         thread.failed.connect(self._on_replay_failed)

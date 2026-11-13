@@ -97,7 +97,7 @@ def test_customer_world_pose_obeys_contract_even_when_legacy_bit_is_true(qtbot):
 def test_customer_lifecycle_and_mode_lock(qtbot):
     w=ClientMainWindow();qtbot.addWidget(w);w.show()
     try:
-        assert w.mode.currentData()=='stereo_inertial'
+        assert w.mode.currentData()=='live_recovery_v4'
         assert len(w.column_widgets)==3
         w.source.setCurrentIndex(w.source.findData('synthetic'))
         w.start_pipeline()

@@ -111,3 +111,15 @@ class LiveRecoveryProfile:
             "vio_environment": self.environment,
             "calibration": self.calibration,
         }
+
+    def recording_options(self, recording):
+        """Bind the same candidate to a recording's own timing snapshot."""
+        self.verify_files()
+        config = load_config_snapshot(calibration=self.paths['calibration'],
+            settings=self.paths['settings'], timing=Path(recording)/'vio_timing.yaml',
+            quality=self.paths['quality'], source='offline_recovery_candidate_v4',
+            timing_override={'image_scale':1.0,'lattice_phase_mode':'session_auto',
+                             'session_phase_verified':False})
+        config.validate_geometry()
+        return {'config_snapshot':config,'library_path':self.paths['library'],
+                'environment':self.environment}

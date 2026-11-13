@@ -103,7 +103,8 @@ def test_normal_gui_keeps_production_modes_and_worker(qtbot, monkeypatch):
     w = ClientMainWindow();qtbot.addWidget(w)
     try:
         assert w.recovery_profile is None and w.source.findData('vendor') >= 0
-        assert w.mode.count() == 4 and '正式 DLL' in w.mode.itemText(0)
+        assert w.mode.count() == 5 and '正式 DLL' in w.mode.itemText(0)
+        assert w.mode.currentData() == 'live_recovery_v4'
         assert w.source.isEnabled() and w.mode.isEnabled()
         called = {}
         monkeypatch.setattr(w.session, 'start', lambda source, **kw: called.update(kw))
