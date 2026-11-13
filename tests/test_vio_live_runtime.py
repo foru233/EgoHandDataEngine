@@ -177,3 +177,26 @@ def test_vio_worker_uses_its_own_conda_runtime(tmp_path, monkeypatch):
     assert env['CONDA_PREFIX']==str(prefix)
     assert env['PATH'].split(__import__('os').pathsep)[0]==str(prefix)
     assert __import__('os').environ['CONDA_PREFIX']=='unrelated-parent-environment'
+
+
+def test_vio_environment_identity_tracks_recovery_policy_content(tmp_path):
+    from egohand.vio.live_runtime import _environment_identity
+
+    recovery = tmp_path / 'recovery.yaml'
+    recovery.write_text('short_recovery: true\n', encoding='utf8')
+    env = {
+        'EGOHAND_VIO_CONFIG': str(tmp_path / 'settings.yaml'),
+        'EGOHAND_VIO_RECOVERY_CONFIG': str(recovery),
+        'EGOHAND_VIO_RECOVERY_PROTOCOL': '2',
+    }
+    first = _environment_identity(env)
+    recovery.write_text('short_recovery: false\n', encoding='utf8')
+    second = _environment_identity(env)
+    assert first != second
+
+
+def test_vio_environment_identity_includes_mode_policy():
+    from egohand.vio.live_runtime import _environment_identity
+
+    assert _environment_identity({'EGOHAND_VIO_DISABLE_RECOVERY': '0'}) != _environment_identity(
+        {'EGOHAND_VIO_DISABLE_RECOVERY': '1'})

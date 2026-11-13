@@ -125,6 +125,27 @@ def live_settings(timing):
                 ROOT/'configs/vio/vs030_rectified_preliminary.yaml').resolve()
 
 
+def _environment_identity(environment):
+    """Return a stable identity for every VIO policy sent to the child.
+
+    The persistent worker is safe to reuse only when the effective child
+    environment is unchanged.  Include file content hashes for path-valued
+    policy inputs so editing a recovery YAML in place cannot silently reuse an
+    old coordinator.
+    """
+    identity = []
+    for key, value in sorted(environment.items()):
+        if not key.startswith('EGOHAND_VIO_'):
+            continue
+        item = [key, value]
+        if key.endswith(('_CONFIG', '_RECOVERY_CONFIG', '_LIBRARY')):
+            path = Path(value)
+            if path.is_file():
+                item.append(hashlib.sha256(path.read_bytes()).hexdigest())
+        identity.append(tuple(item))
+    return tuple(identity)
+
+
 def live_hand_config(descriptor, camera_geometry, mode, effective_timing):
     """Bind configured files AND the per-session phase actually used for frames."""
     value={'schema_version':1,'base_config_fingerprint':descriptor['fingerprint'],
@@ -158,10 +179,11 @@ class LiveVioWorker:
         library=select_library(ROOT/'src/egohand/vio/native')
         if mode=='hybrid':
             library=Path(__file__).resolve().parent/'native'/'bin'/'egohand_vio_visual_bootstrap.dll'
-        identity=(mode,settings,hashlib.sha256(settings.read_bytes()).hexdigest(),
-                  library,hashlib.sha256(library.read_bytes()).hexdigest() if library.is_file() else None,
-                  os.environ.get('EGOHAND_VIO_RECOVERY_PROTOCOL',str(PROTOCOL)),
-                  os.environ.get('EGOHAND_VIO_DISABLE_RECOVERY'))
+        env=apply_mode_environment(vio_subprocess_environment(recovery_protocol=PROTOCOL),mode)
+        env['EGOHAND_VIO_CONFIG']=str(settings)
+        identity=(mode, settings, hashlib.sha256(settings.read_bytes()).hexdigest(),
+                  library, hashlib.sha256(library.read_bytes()).hexdigest() if library.is_file() else None,
+                  _environment_identity(env))
         with self._lock:
             if self.proc is not None and (self.proc.poll() is not None or identity!=self.settings):
                 self._close()
@@ -169,8 +191,6 @@ class LiveVioWorker:
             if not reused:
                 self.log_path=ROOT/'logs'/f'vio_vs030_worker_{time.time_ns()}.log'
                 self.log_path.parent.mkdir(exist_ok=True)
-                env=apply_mode_environment(vio_subprocess_environment(recovery_protocol=PROTOCOL),mode)
-                env['EGOHAND_VIO_CONFIG']=str(settings)
                 with self.log_path.open('w',encoding='utf8') as log:
                     self.proc=subprocess.Popen(
                         [str(PYTHON),'-m','egohand.vio.live_subprocess','--live-sessions'],
