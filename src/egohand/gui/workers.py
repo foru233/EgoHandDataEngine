@@ -394,6 +394,7 @@ class PipelineWorker(QThread):
         replay_options={'continue_on_localization_error':True}
         if self.vio_config_snapshot is not None:replay_options['config_snapshot']=self.vio_config_snapshot
         if self.vio_library_path is not None:replay_options['library_path']=self.vio_library_path
+        if self.vio_environment:replay_options['environment']=self.vio_environment
         if self.coordinated_stereo:replay_options['coordinated_stereo']=True
         self.replay_vio=ReplayVio(self.source.recording_dir,output_dir=output,
             mode=self.vio_mode,on_status=status,on_frame=frame_ready,worker=self.vio_worker,**replay_options)

@@ -384,7 +384,8 @@ class LiveVio:
                 min_jump_m=float(quality_cfg.pop('continuity_min_jump_m',0.25)),
             )
             # 丢失恢复后重新等待稳定，不将两帧一致当成已验证重定位正确。
-            quality=make_quality_gate(self.mode,resume_same_map=False,**quality_cfg)
+            quality=make_quality_gate(self.mode,resume_same_map=False,
+                recovery_config=self.vio_environment.get('EGOHAND_VIO_RECOVERY_CONFIG'),**quality_cfg)
             if self.stop_event.is_set():return
             proc,reused,worker_log=self.worker.request_session(
                 listener.getsockname()[1],settings.resolve(),log_path.stem,mode=self.mode,

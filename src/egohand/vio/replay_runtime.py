@@ -128,12 +128,13 @@ class ReplayBridge:
     """本机 TCP + `egohand.vio.live_subprocess` 子进程，协议与实时链路完全相同。"""
 
     def __init__(self, log_path, *, handshake_timeout=HANDSHAKE_TIMEOUT_S, timeout=TRACK_TIMEOUT_S,
-                 settings_path=None, mode=DEFAULT_MODE, worker=None, library_path=None, coordinated_stereo=False):
+                 settings_path=None, mode=DEFAULT_MODE, worker=None, library_path=None, coordinated_stereo=False, environment=None):
         self.mode=validate_mode(mode)
         self.library_path = None if library_path is None else Path(library_path).resolve(strict=True)
         if self.library_path is not None and worker is not None:
             raise ValueError('显式离线DLL须使用独立worker，不能复用GUI估计器')
         self.coordinated_stereo=bool(coordinated_stereo)
+        self.environment=dict(environment or {})
         if self.coordinated_stereo and (self.mode != STEREO or worker is not None):
             raise ValueError('显式双目单所有者协议只支持独立离线Stereo会话')
         # A shared worker keeps one ORB process (and therefore the already-loaded vocabulary)
@@ -177,6 +178,11 @@ class ReplayBridge:
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
             self.log = self.log_path.open('w', encoding='utf8')
             env = apply_mode_environment(vio_subprocess_environment(recovery_protocol=PROTOCOL), self.mode)
+            if self.environment:
+                env={k:v for k,v in env.items() if not k.startswith(('EGOHAND_VIO_', 'EGOHAND_TEST_'))}
+                env.update(self.environment)
+                env['EGOHAND_VIO_STEREO_ONLY']='1' if self.mode==STEREO else '0'
+                env['EGOHAND_VIO_RECOVERY_PROTOCOL']=str(PROTOCOL)
             if self.library_path is not None:
                 env['EGOHAND_VIO_LIBRARY'] = str(self.library_path)
             if self.coordinated_stereo:
@@ -480,7 +486,7 @@ class ReplayVio:
     def __init__(self, recording_dir, *, output_dir=None, timing=None, stride=1,
                  max_frames=None, on_status=None, config_snapshot=None, mode=DEFAULT_MODE, on_frame=None,
                  worker=None, start_stamp_ns=None, end_stamp_ns=None, library_path=None, coordinated_stereo=False,
-                 continue_on_localization_error=False):
+                 continue_on_localization_error=False, environment=None):
         self.mode = validate_mode(mode)
         self.use_imu = self.mode != STEREO
         self.on_frame = on_frame
@@ -488,6 +494,7 @@ class ReplayVio:
         # vocabulary is loaded once per GUI instead of once per replay.
         self.worker = worker
         self.library_path = library_path
+        self.environment=dict(environment or {})
         self.coordinated_stereo=bool(coordinated_stereo)
         self.continue_on_localization_error=bool(continue_on_localization_error)
         self.recording_dir = Path(recording_dir).resolve()
@@ -613,7 +620,7 @@ class ReplayVio:
             # 显示重锚选项不属于质量门控；回放保留原地图坐标。
             for key in ('pose_continuity', 'continuity_max_speed_mps', 'continuity_min_jump_m'):
                 quality_options.pop(key, None)
-            quality = make_quality_gate(self.mode, **quality_options)
+            quality = make_quality_gate(self.mode, recovery_config=self.environment.get('EGOHAND_VIO_RECOVERY_CONFIG'), **quality_options)
             alignment = timing['imu_alignment']
             packet_lattice = (alignment == 'lattice' and timing['lattice_reference'] == 'packet'
                               and hasattr(sdk, 'iter_imu_packets'))
@@ -642,6 +649,7 @@ class ReplayVio:
             frames_iter = sdk.iter_paired_frames(self.recording_dir)
             poses_file = (out_dir / 'poses.jsonl').open('w', encoding='utf8', buffering=1)
             library_options = {'library_path': self.library_path} if self.library_path is not None else {}
+            if self.environment:library_options['environment']=self.environment
             if self.coordinated_stereo:library_options['coordinated_stereo']=True
             bridge = ReplayBridge(out_dir / 'run.log', settings_path=config.settings, mode=self.mode,
                                   worker=self.worker, **library_options)

@@ -46,14 +46,14 @@ class HybridPoseQualityGate:
         return out
 
 
-def make_quality_gate(mode, **options):
+def make_quality_gate(mode, *, recovery_config=None, **options):
     # The offline candidate profile is an explicit opt-in shared with the
     # worker. The normal live/recorded quality configuration is unchanged.
     if mode == 'stereo_inertial':
         import os
         from pathlib import Path
         import yaml
-        path=os.environ.get('EGOHAND_VIO_RECOVERY_CONFIG')
+        path=recovery_config or os.environ.get('EGOHAND_VIO_RECOVERY_CONFIG')
         if path:
             profile=yaml.safe_load(Path(path).read_text(encoding='utf8')) or {}
             if not isinstance(profile,dict):raise ValueError('VIO 恢复参数必须是字典')

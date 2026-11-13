@@ -87,6 +87,7 @@ class ClientMainWindow(QMainWindow):
         self.source=QComboBox();self.source.setAccessibleName('数据源');self.source.addItem('VS030 设备','vendor');self.source.addItem('录制回放','recorded');self.source.addItem('合成演示（非实测）','synthetic')
         self.mode=QComboBox();self.mode.setAccessibleName('定位算法');self.mode.addItem('双目＋IMU · 正式 DLL','stereo_inertial');self.mode.addItem('纯双目视觉 · 正式 DLL','stereo')
         self.mode.addItem('混合 · VIO优先 / 视觉回退','hybrid')
+        self.mode.addItem('双目＋IMU · v4 离线恢复实验版','offline_recovery_v4')
         if self.recovery_profile:
             self.source.clear();self.source.addItem('录制回放 · 离线候选','recorded')
             self.mode.clear();self.mode.addItem('双目＋IMU · 恢复候选 v4','stereo_inertial')
@@ -265,6 +266,9 @@ class ClientMainWindow(QMainWindow):
 
     def select_recording(self,path):
         self.recording_source=Path(path);self.source.setCurrentIndex(self.source.findData('recorded'));self.source_label.setText('录制：'+str(path)+(' · 全分辨率恢复候选' if self.recovery_profile else ' · 按录制快照重新计算'))
+        if not self.recovery_profile and not self.live_recovery_profile:
+            self.mode.setCurrentIndex(self.mode.findData('offline_recovery_v4'))
+            self.source_label.setText('录制：'+str(path)+' · 已选择 v4 离线恢复实验版')
 
     def start_pipeline(self):
         if not self.stop_pipeline():return
@@ -274,11 +278,17 @@ class ClientMainWindow(QMainWindow):
                 raise ValueError('离线恢复候选仅支持双目＋IMU录制回放')
             if self.live_recovery_profile and kind!='vendor':
                 raise ValueError('v4 实时恢复实验版仅支持 VS030 设备；离线录制请使用离线候选入口')
+            selected_mode=self.mode.currentData()
+            if selected_mode=='offline_recovery_v4' and kind!='recorded':
+                raise ValueError('v4 离线恢复实验版只支持录制回放')
             if kind=='recorded' and not self.recording_source:raise ValueError('请先导入录制目录')
             output=Path(self.replay_output_dir) if self.replay_output_dir else DELIVERY_ROOT/'sessions'/('replay_'+str(time.time_ns()))
             options={'vio_worker':self.live_vio_worker}
             if self.recovery_profile:options=self.recovery_profile.worker_options(self.recording_source,output)
             elif self.live_recovery_profile:options={**options,**self.live_recovery_profile.worker_options()}
+            elif selected_mode=='offline_recovery_v4':
+                from offline_recovery import OfflineRecoveryProfile
+                options=OfflineRecoveryProfile().worker_options(self.recording_source,output,isolated_environment=True)
             source=create_source(SourceRequest(kind=kind,path=str(self.recording_source or ''),loop=False))
             detector=yaml.safe_load((ROOT/'configs/detector.yaml').read_text(encoding='utf8')) if kind!='synthetic' else None
             if detector:detector['model_path']=str(ROOT/detector['model_path'])
@@ -292,7 +302,7 @@ class ClientMainWindow(QMainWindow):
             self.left_tile.set_caption('校正 · 左');self.right_tile.set_caption('校正 · 右')
             self.raw_left_tile.set_caption('原始 · 左');self.raw_right_tile.set_caption('原始 · 右')
             self.hand_overlay.clear();self.vio_panel.clear();self.vio_panel.begin_live()
-            self.session.start(source,config=config,detector_config=detector,offline=kind=='recorded',live_vio=kind!='synthetic',vio_mode=self.mode.currentData(),vio_output_dir=output,vio_worker=options.pop('vio_worker'),**options)
+            self.session.start(source,config=config,detector_config=detector,offline=kind=='recorded',live_vio=kind!='synthetic',vio_mode='stereo_inertial' if selected_mode=='offline_recovery_v4' else selected_mode,vio_output_dir=output,vio_worker=options.pop('vio_worker'),**options)
             self.world_meta.setText('合成演示不运行定位' if kind=='synthetic' else '等待定位初始化')
             self.set_status('正在准备');self.sync_controls()
         except Exception as exc:self.show_error(str(exc));self.sync_controls()
@@ -334,7 +344,7 @@ class ClientMainWindow(QMainWindow):
         self.calibration=info.get('calibration');meta=info.get('metadata');self.set_status('运行中')
         if not info.get('model_loaded') and not getattr(meta,'synthetic',False):
             self.set_status('手部模型未加载 · 相机预览仍可用')
-        self.source_label.setText('合成演示 · 非设备实测' if getattr(meta,'synthetic',False) else '录制回放 · 按原始数据重新计算' if self.source.currentData()=='recorded' else 'VS030 已连接 · 左右通道 / '+('v4 恢复候选已启用' if self.live_recovery_profile else '当前算法已启用'))
+        self.source_label.setText('合成演示 · 非设备实测' if getattr(meta,'synthetic',False) else ('录制回放 · v4 离线恢复实验版' if self.mode.currentData()=='offline_recovery_v4' or self.recovery_profile else '录制回放 · 按原始数据重新计算') if self.source.currentData()=='recorded' else 'VS030 已连接 · 左右通道 / '+('v4 恢复候选已启用' if self.live_recovery_profile else '当前算法已启用'))
 
     def on_vio(self,message):
         if self.paused:

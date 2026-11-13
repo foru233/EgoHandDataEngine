@@ -103,7 +103,7 @@ def test_normal_gui_keeps_production_modes_and_worker(qtbot, monkeypatch):
     w = ClientMainWindow();qtbot.addWidget(w)
     try:
         assert w.recovery_profile is None and w.source.findData('vendor') >= 0
-        assert w.mode.count() == 3 and '正式 DLL' in w.mode.itemText(0)
+        assert w.mode.count() == 4 and '正式 DLL' in w.mode.itemText(0)
         assert w.source.isEnabled() and w.mode.isEnabled()
         called = {}
         monkeypatch.setattr(w.session, 'start', lambda source, **kw: called.update(kw))
@@ -111,3 +111,28 @@ def test_normal_gui_keeps_production_modes_and_worker(qtbot, monkeypatch):
         assert called['vio_worker'] is w.live_vio_worker
         assert 'vio_library_path' not in called and 'vio_config_snapshot' not in called
     finally:w.close()
+
+
+def test_normal_gui_recording_selects_isolated_candidate(qtbot, monkeypatch, tmp_path):
+    import client_gui
+    w=ClientMainWindow(replay_output_dir=tmp_path/'run');qtbot.addWidget(w)
+    called={}
+    monkeypatch.setattr(w.session,'start',lambda source,**kw: called.update(kw))
+    monkeypatch.setattr(client_gui,'create_source',lambda request: called.update(request=request))
+    try:
+        w.select_recording(RECORDING)
+        assert w.mode.currentData()=='offline_recovery_v4'
+        w.start_pipeline()
+        assert w.last_error is None and called['request'].kind=='recorded'
+        assert called['vio_mode']=='stereo_inertial' and called['vio_worker'] is None
+        assert called['vio_environment']['EGOHAND_VIO_SHORT_RECOVERY']=='1'
+        assert called['vio_library_path'].name=='egohand_vio_short_recovery_candidate.dll'
+    finally:w.close()
+
+
+def test_candidate_host_quality_gate_uses_explicit_policy_without_global_environment(monkeypatch):
+    from egohand.vio.hybrid_quality import make_quality_gate
+    monkeypatch.delenv('EGOHAND_VIO_RECOVERY_CONFIG',raising=False)
+    profile=OfflineRecoveryProfile()
+    gate=make_quality_gate('stereo_inertial',recovery_config=profile.paths['recovery'])
+    assert gate.allow_verified_stereo_bootstrap is True

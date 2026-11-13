@@ -45,9 +45,9 @@ class OfflineRecoveryProfile:
                 del os.environ[key]
         os.environ.update(self.environment)
 
-    def worker_options(self, recording, output):
+    def worker_options(self, recording, output, *, isolated_environment=False):
         self.verify_files()
-        if any(os.environ.get(k) != v for k, v in self.environment.items()):
+        if not isolated_environment and any(os.environ.get(k) != v for k, v in self.environment.items()):
             raise ValueError('请使用离线候选专用启动入口，恢复策略尚未启用')
         recording, output = Path(recording).resolve(), Path(output).resolve()
         if output == recording or recording in output.parents or output in recording.parents:
@@ -71,5 +71,7 @@ class OfflineRecoveryProfile:
             'source_sha256': {str(p.relative_to(ROOT)): sha(p) for p in source_files},
             'fresh_hand_inference': True, 'production_deployed': False}
         (output/'gui_launch.json').write_text(json.dumps(provenance, ensure_ascii=False, indent=2), encoding='utf8')
-        return dict(calibration=calibration, vio_config_snapshot=config,
+        options=dict(calibration=calibration, vio_config_snapshot=config,
                     vio_library_path=self.paths['library'], vio_worker=None)
+        if isolated_environment:options['vio_environment']=self.environment
+        return options
