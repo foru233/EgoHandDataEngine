@@ -2,6 +2,7 @@
 from collections import deque
 from dataclasses import replace
 import json
+import hashlib
 import os
 from pathlib import Path
 import queue
@@ -13,20 +14,54 @@ import time
 import cv2
 import numpy as np
 import yaml
+import uuid
 
 from .vs030_imu_candidate import parse_candidate_payload
 from .vs030_geometry import prepare_vs030_vio_geometry
-from .pose_quality import PoseQualityGate
+from .hybrid_quality import make_quality_gate
+from .pose_continuity import PoseContinuityCorrector
+from .localization_state import LocalizationPipeline
+from .modes import DEFAULT_MODE, STEREO, validate_mode, apply_mode_environment
 from .imu_lattice import LatticeImuBuffer, PacketLatticeImuBuffer, packet_lattice_phase_ns
+from .recovery_contract import (PROTOCOL, FRAME_CONTEXT, RESET_IMU_ALIGNMENT,
+    RecoveryProtocolError, application_feedback, send_message, negotiate_recovery)
 
 ROOT=Path(__file__).resolve().parents[3]
-PYTHON=Path(os.environ.get('EGOHAND_VIO_PYTHON', 'python.exe'))  # 鍙€夛細鎸囧悜宸插畨瑁?egohand-vio 鐜鐨勮В閲婂櫒
-CALIBRATION=ROOT/'标定结果/1/data3-camchain-imucam.yaml'
+_VIO_CONDA_PYTHON=Path.home()/'miniconda3/envs/egohand-vio/python.exe'
+# 优先使用现有独立 VIO 环境；可通过环境变量指定其他解释器，无需安装或替换 GUI 环境。
+PYTHON=Path(os.environ.get('EGOHAND_VIO_PYTHON') or (str(_VIO_CONDA_PYTHON) if _VIO_CONDA_PYTHON.is_file() else 'python.exe'))
+from ..sources.vendor_placeholder import CALIBRATION_PATH as CALIBRATION
 HEADER=struct.Struct('<qIII'); IMU=struct.Struct('<q6f')
 # Diagnostic raw packet archive: magic, version, header_size, device_ts, SDK capture/arrival ns, payload_size.
 IMU_RAW_HEADER=struct.Struct('<4sHHQQQI')
 MAX_IMU_GAP_NS=30_000_000
 IMU_HISTORY_KEEP_NS=1_000_000_000
+MAX_WORKER_RESTARTS=2  # 避免原生故障时无限重启。
+
+def vio_subprocess_environment(python=PYTHON, *, role='live', recovery_protocol=1):
+    """隔离 VIO 运行库搜索路径，不改动 GUI 进程或系统环境。"""
+    env=os.environ.copy()
+    registry=ROOT/'src/egohand/vio/native/bin/active_bridges.json'
+    if registry.is_file() and not env.get('EGOHAND_VIO_LIBRARY'):
+        deployment=json.loads(registry.read_text(encoding='utf8'))
+        if role not in ('live','atlas'):
+            raise ValueError('未知 VIO 部署角色')
+        flags=deployment.get('roles',{}).get(role,{}).get('environment',{})
+        allowed={'EGOHAND_VIO_GAUGE_CONSTRAINT','EGOHAND_VIO_WORLD_FRAME_DISABLE',
+                 'EGOHAND_VIO_DEPTH_GATE','EGOHAND_VIO_POINT_CLAMP',
+                 'EGOHAND_VIO_ENTRY_PRUNE','EGOHAND_VIO_GAUGE_FIX','EGOHAND_VIO_CHEIRALITY_GUARD'}
+        if any(key not in allowed or value not in ('0','1') for key,value in flags.items()):
+            raise ValueError('VIO 部署清单包含无效功能开关')
+        env.update(flags)
+    env['PYTHONPATH']=str(ROOT/'src')+os.pathsep+env.get('PYTHONPATH','')
+    env.setdefault('EGOHAND_VIO_RECOVERY_PROTOCOL',str(recovery_protocol))
+    executable=Path(python)
+    prefix=executable.parent
+    if executable.is_absolute() and (prefix/'conda-meta').is_dir():
+        env['CONDA_PREFIX']=str(prefix)
+        dirs=(prefix,prefix/'Scripts',prefix/'Library'/'bin')
+        env['PATH']=os.pathsep.join(str(p) for p in dirs)+os.pathsep+env.get('PATH','')
+    return env
 
 def _recv(sock,n):
     result=bytearray()
@@ -36,9 +71,12 @@ def _recv(sock,n):
         result.extend(chunk)
     return bytes(result)
 
-def _send_tracking_frame(sock, stamp, left, right, measurements):
+def _send_tracking_frame(sock, stamp, left, right, measurements, *, recovery_protocol=1,
+                         reset_imu_alignment=False):
     packet = b''.join(IMU.pack(*row) for row in measurements)
     sock.sendall(HEADER.pack(int(stamp), left.shape[1], left.shape[0], len(measurements)))
+    if recovery_protocol==PROTOCOL:
+        sock.sendall(FRAME_CONTEXT.pack(RESET_IMU_ALIGNMENT if reset_imu_alignment else 0))
     sock.sendall(memoryview(left).cast('B'))
     sock.sendall(memoryview(right).cast('B'))
     if packet:
@@ -79,19 +117,111 @@ class CandidateImuBuffer:
         while len(self.rows)>2 and self.rows[1].time_a_raw<=end-IMU_HISTORY_KEEP_NS:self.rows.popleft()
         return out
 
+def live_settings(timing):
+    config=timing.get('orb_config')
+    if config:
+        return (ROOT/str(config)).resolve()
+    return Path(os.environ.get('EGOHAND_VIO_CONFIG') or
+                ROOT/'configs/vio/vs030_rectified_preliminary.yaml').resolve()
+
+
+def live_hand_config(descriptor, camera_geometry, mode, effective_timing):
+    """Bind configured files AND the per-session phase actually used for frames."""
+    value={'schema_version':1,'base_config_fingerprint':descriptor['fingerprint'],
+        'calibration_file_sha256':descriptor['hashes']['calibration'],
+        'camera_geometry_sha256':camera_geometry,'camera_frame':'raw_cam0_channel4',
+        'mode':mode,'effective_timing':dict(effective_timing)}
+    value['fingerprint']=hashlib.sha256(json.dumps(value,sort_keys=True,allow_nan=False).encode()).hexdigest()
+    return value
+
+
+class LiveVioWorker:
+    """Own the isolated ORB process across capture sessions in one GUI."""
+
+    def __init__(self):
+        self.proc=None
+        self.settings=None
+        self.log_path=None
+        self._lock=threading.Lock()
+
+    def preload(self):
+        from .config_snapshot import resolve_live_config
+        config=resolve_live_config()
+        self.request_session(None,config.settings,'preload')
+
+    def request_session(self, port, settings, session, *, mode=DEFAULT_MODE):
+        mode=validate_mode(mode)
+        if mode=='hybrid':
+            from .hybrid_settings import visual_bootstrap_settings
+            settings=visual_bootstrap_settings(settings)
+        from .library_manifest import select_library
+        library=select_library(ROOT/'src/egohand/vio/native')
+        if mode=='hybrid':
+            library=Path(__file__).resolve().parent/'native'/'bin'/'egohand_vio_visual_bootstrap.dll'
+        identity=(mode,settings,hashlib.sha256(settings.read_bytes()).hexdigest(),
+                  library,hashlib.sha256(library.read_bytes()).hexdigest() if library.is_file() else None,
+                  os.environ.get('EGOHAND_VIO_RECOVERY_PROTOCOL',str(PROTOCOL)),
+                  os.environ.get('EGOHAND_VIO_DISABLE_RECOVERY'))
+        with self._lock:
+            if self.proc is not None and (self.proc.poll() is not None or identity!=self.settings):
+                self._close()
+            reused=self.proc is not None
+            if not reused:
+                self.log_path=ROOT/'logs'/f'vio_vs030_worker_{time.time_ns()}.log'
+                self.log_path.parent.mkdir(exist_ok=True)
+                env=apply_mode_environment(vio_subprocess_environment(recovery_protocol=PROTOCOL),mode)
+                env['EGOHAND_VIO_CONFIG']=str(settings)
+                with self.log_path.open('w',encoding='utf8') as log:
+                    self.proc=subprocess.Popen(
+                        [str(PYTHON),'-m','egohand.vio.live_subprocess','--live-sessions'],
+                        stdin=subprocess.PIPE,stdout=log,stderr=subprocess.STDOUT,env=env,
+                        creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0)|0x00008000,
+                    )
+                self.settings=identity
+            try:
+                self.proc.stdin.write((json.dumps([port,session])+'\n').encode('ascii'))
+                self.proc.stdin.flush()
+            except OSError as exc:
+                self._close()
+                raise RuntimeError(f'无法连接 ORB-SLAM3 进程，详见 {self.log_path}') from exc
+            return self.proc,reused,self.log_path
+
+    def close(self):
+        with self._lock:
+            self._close()
+
+    def _close(self):
+        proc,self.proc=self.proc,None
+        self.settings=None
+        if proc is None:return
+        try:proc.stdin.close()
+        except OSError:pass
+        try:proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=3)
+
+
 class LiveVio:
-    def __init__(self,source,on_status,timing=None):
+    def __init__(self,source,on_status,timing=None,*,worker=None,mode=DEFAULT_MODE):
+        self.mode=validate_mode(mode)
+        self.use_imu=self.mode!=STEREO
         self.source=source;self.on_status=on_status;self.frames=queue.Queue(maxsize=1)
-        self.stop_event=threading.Event();self.thread=None;self.sock=None;self.proc=None
+        self.source_session_id=uuid.uuid4().hex
+        self.stop_event=threading.Event();self.thread=None;self.sock=None
+        self._owns_worker=worker is None
+        self.worker=LiveVioWorker() if worker is None else worker
         self.ready_event=threading.Event();self.ready=False;self.startup_error=None
         self.motion_event=threading.Event();self.motion_samples=0
         self.timing_override=dict(timing) if timing is not None else None
         self.defer_imu=False
+        self._frame_stats_lock=threading.Lock()
+        self._frame_stats={'submitted':0,'deferred':0,'replaced':0,'dequeued':0,'restart_discarded':0}
     def start(self, *, defer_imu=False):
         self.stop_event.clear();self.ready_event.clear();self.ready=False;self.startup_error=None
         self.motion_event.clear();self.motion_samples=0
         self.defer_imu=defer_imu
-        if not defer_imu:self.source.enable_imu_capture()
+        if self.use_imu and not defer_imu:self.source.enable_imu_capture()
         self.thread=threading.Thread(target=self._run,name='LiveVio',daemon=True);self.thread.start()
     def wait_ready(self,timeout=60.0):
         """Wait for ORB-SLAM3 vocabulary/settings initialization before starting camera streaming."""
@@ -100,59 +230,136 @@ class LiveVio:
             return False
         return bool(self.ready and self.thread is not None and self.thread.is_alive())
     def submit(self,frame):
-        if self.defer_imu and not self.ready:return
-        try:self.frames.put_nowait(frame)
-        except queue.Full:
-            try:self.frames.get_nowait()
-            except queue.Empty:pass
-            self.frames.put_nowait(frame)
+        submitted_ns=time.perf_counter_ns()
+        with self._frame_stats_lock:
+            if self.defer_imu and not self.ready:
+                self._frame_stats['deferred']+=1
+                return
+            self._frame_stats['submitted']+=1
+            try:self.frames.put_nowait((frame,submitted_ns))
+            except queue.Full:
+                try:
+                    self.frames.get_nowait()
+                    self._frame_stats['replaced']+=1
+                except queue.Empty:pass
+                self.frames.put_nowait((frame,submitted_ns))
+    def _take_frame(self,timeout):
+        frame,submitted_ns=self.frames.get(timeout=timeout)
+        dequeued_ns=time.perf_counter_ns()
+        with self._frame_stats_lock:self._frame_stats['dequeued']+=1
+        return frame,submitted_ns,dequeued_ns
+    def frame_queue_stats(self):
+        """Cumulative instance counters, including warmup and restarted sessions.
+
+        These count VIO queue activity, not camera capture losses or accepted poses.
+        """
+        with self._frame_stats_lock:return dict(self._frame_stats)
     def close(self):
         self.stop_event.set()
-        if self.sock:
-            try:self.sock.shutdown(socket.SHUT_RDWR)
+        sock=self.sock
+        if sock:
+            try:sock.shutdown(socket.SHUT_RDWR)
             except OSError:pass
-        if not self.ready and self.proc and self.proc.poll() is None:self.proc.terminate()
-        if self.thread:self.thread.join(timeout=12)
-        if self.proc and self.proc.poll() is None:
-            self.proc.terminate()
-            try:self.proc.wait(timeout=3)
-            except subprocess.TimeoutExpired:self.proc.kill();self.proc.wait(timeout=3)
+        if self.thread:
+            self.thread.join(timeout=12)
+            if self.thread.is_alive():
+                self.worker.close()
+                self.thread.join(timeout=3)
     def _read_message(self):
         length=struct.unpack('<I',_recv(self.sock,4))[0]
         if length>100000:raise ValueError('VIO 响应过大')
         return json.loads(_recv(self.sock,length).decode('utf8'))
+    def _commit_recovery(self,result):
+        send_message(self.sock,application_feedback(result))
+        reply=self._read_message()
+        if reply.get('type')!='recovery_committed':
+            raise RecoveryProtocolError(reply.get('message','recovery commit missing'))
+        return reply.get('recovery_preaccept')
     def _run(self):
+        restarts=0
+        while not self.stop_event.is_set():
+            retry=self._run_session()
+            if not retry or self.stop_event.is_set():return
+            if restarts>=MAX_WORKER_RESTARTS:
+                self.on_status({'type':'error','message':f'ORB-SLAM3 多次异常退出，已停止自动重启；日志：{self.worker.log_path}'})
+                return
+            restarts+=1
+            self.ready=False
+            self.on_status({'type':'vio_reset','message':f'ORB-SLAM3 异常退出，正在重启并新建地图（{restarts}/{MAX_WORKER_RESTARTS}）；旧地图位置不可直接连接'})
+            if self.stop_event.wait(1.0):return
+            try:
+                while True:
+                    with self._frame_stats_lock:
+                        self.frames.get_nowait()
+                        self._frame_stats['restart_discarded']+=1
+            except queue.Empty:pass
+            try:
+                if self.use_imu and not self.defer_imu:self.source.enable_imu_capture(allow_running=True)
+            except Exception as exc:
+                self.on_status({'type':'error','message':f'重启 VIO 时无法重新启用 IMU：{exc}'})
+                return
+
+    def _run_session(self):
         listener=None;log=None;audit=None;imu_raw=None;imu_raw_path=None;imu_raw_count=0
+        proc=None;worker_failed=False;retry=False;worker_log=None;phase_preparation=None
         try:
-            self.on_status({'type':'status','message':'正在加载 ORB-SLAM3 词典，定位将在加载完成后启动…'})
-            geometry=prepare_vs030_vio_geometry(CALIBRATION)
-            timing=self.timing_override if self.timing_override is not None else yaml.safe_load((ROOT/'configs/vio/live_timing.yaml').read_text(encoding='utf8'))
+            from .config_snapshot import resolve_live_config, load_config_snapshot
+            config=resolve_live_config()
+            if self.timing_override is not None:
+                config=load_config_snapshot(calibration=config.calibration,
+                    settings=live_settings(self.timing_override),timing=config.timing_path,
+                    quality=config.quality_path,source='live_override',timing_override=self.timing_override)
+            geometry=config.validate_geometry(prepare_vs030_vio_geometry(config.calibration))
+            from ..calibration.loader import load_calibration
+            from .hand_world import calibration_geometry_fingerprint
+            from .live_hand_join import live_capture_binding
+            descriptor=config.describe()
+            camera_geometry=calibration_geometry_fingerprint(
+                load_calibration(config.calibration,kalibr_left_camera='cam0'))
+            timing=dict(config.timing)
             listener=socket.socket();listener.bind(('127.0.0.1',0));listener.listen(1);listener.settimeout(.5)
-            env=os.environ.copy();env['PYTHONPATH']=str(ROOT/'src')+os.pathsep+env.get('PYTHONPATH','')
-            if timing.get('orb_config'):
-                orb_cfg=Path(str(timing['orb_config']))
-                env['EGOHAND_VIO_CONFIG']=str(orb_cfg if orb_cfg.is_absolute() else ROOT/orb_cfg)
+            settings=config.settings
             (ROOT/'logs').mkdir(exist_ok=True)
             log_path=ROOT/'logs'/f'vio_vs030_live_{time.time_ns()}.log'
+            log_path.with_name(log_path.stem+'_config.json').write_text(
+                json.dumps(config.describe(),ensure_ascii=False,indent=2),encoding='utf8')
             log=open(log_path,'w',encoding='utf8')
             audit=open(log_path.with_name(log_path.stem+'_poses.jsonl'),'w',encoding='utf8',buffering=1)
-            imu_raw_path=log_path.with_name(log_path.stem+'_imu_raw.bin')
-            imu_raw=open(imu_raw_path,'wb',buffering=0)
-            quality=PoseQualityGate(**yaml.safe_load((ROOT/'configs/vio/live_quality.yaml').read_text(encoding='utf8')))
+            if self.use_imu:
+                imu_raw_path=log_path.with_name(log_path.stem+'_imu_raw.bin')
+                imu_raw=open(imu_raw_path,'wb',buffering=0)
+            quality_cfg=dict(config.quality)
+            continuity=PoseContinuityCorrector(
+                enabled=bool(quality_cfg.pop('pose_continuity',False)),
+                max_speed_mps=float(quality_cfg.pop('continuity_max_speed_mps',3.0)),
+                min_jump_m=float(quality_cfg.pop('continuity_min_jump_m',0.25)),
+            )
+            # 丢失恢复后重新等待稳定，不将两帧一致当成已验证重定位正确。
+            quality=make_quality_gate(self.mode,resume_same_map=False,**quality_cfg)
             if self.stop_event.is_set():return
-            self.proc=subprocess.Popen([str(PYTHON),'-m','egohand.vio.live_subprocess',str(listener.getsockname()[1])],
-                stdout=log,stderr=subprocess.STDOUT,env=env,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0)|0x00008000)
+            proc,reused,worker_log=self.worker.request_session(
+                listener.getsockname()[1],settings.resolve(),log_path.stem,mode=self.mode)
+            log.write(f'ORB-SLAM3 进程日志：{worker_log}\n')
+            self.on_status({'type':'status','message':('正在复用 ORB-SLAM3 词典，准备新会话…' if reused
+                else '正在加载 ORB-SLAM3 词典，定位将在加载完成后启动…')})
             deadline=time.monotonic()+60
             while not self.stop_event.is_set():
                 try:self.sock,_=listener.accept();break
                 except socket.timeout:
-                    if self.proc.poll() is not None:raise RuntimeError(f'VIO 子进程启动失败，详见 {log_path}')
+                    if proc.poll() is not None:raise RuntimeError(f'VIO 子进程启动失败，详见 {worker_log}')
                     if time.monotonic()>deadline:raise TimeoutError('VIO 子进程连接超时')
             if self.stop_event.is_set():return
             self.sock.settimeout(45)
             self.sock.setsockopt(socket.IPPROTO_TCP,socket.TCP_NODELAY,1)
             message=self._read_message()
-            if message.get('type')!='ready':raise RuntimeError(message.get('message','VIO 初始化失败'))
+            if message.get('type')!='ready':
+                worker_failed=True
+                raise RuntimeError(message.get('message','VIO 初始化失败'))
+            recovery_protocol=negotiate_recovery(message,
+                requested=int(os.environ.get('EGOHAND_VIO_RECOVERY_PROTOCOL',str(PROTOCOL))),
+                enabled=self.use_imu and os.environ.get('EGOHAND_VIO_DISABLE_RECOVERY')!='1')
+            localization=LocalizationPipeline(self.mode,quality,continuity=continuity,
+                recovery_commit=self._commit_recovery if recovery_protocol==PROTOCOL else None)
             lag_ms=float(timing.get('camera_to_imu_lag_ms',0.0))
             if not np.isfinite(lag_ms) or abs(lag_ms)>1000:raise ValueError('相机—IMU 时间偏移无效')
             alignment=str(timing.get('imu_alignment','timestamp')).strip().lower()
@@ -161,23 +368,42 @@ class LiveVio:
             lattice_reference=timing.get('lattice_reference','packet')
             if lattice_reference not in ('packet','count'):raise ValueError('未知的格点参考方式')
             packet_lattice=alignment=='lattice' and lattice_reference=='packet'
+            phase_auto=self.use_imu and timing.get('lattice_phase_mode','manual')=='session_auto'
+            if phase_auto and not packet_lattice:
+                raise ValueError('自动会话时序核验只支持 IMU 包格点模式')
             image_scale=float(timing.get('image_scale',1.0))
             if not (0.25<=image_scale<=1.0):raise ValueError(f'image_scale 超出范围：{image_scale}')
-            if alignment=='lattice':
+            if not self.use_imu:
+                buffer=None
+                mode_text='纯双目视觉'
+            elif alignment=='lattice':
                 options=dict(sample_rate_hz=float(timing.get('imu_rate_hz',480.0)),
                              camera_to_imu_drift_ppm=drift_ppm,capacity=20000)
-                buffer=(PacketLatticeImuBuffer(phase_ns=packet_lattice_phase_ns(timing),**options)
+                buffer=(PacketLatticeImuBuffer(phase_ns=packet_lattice_phase_ns(
+                            {**timing,'lattice_phase_mode':'manual'} if phase_auto or not self.use_imu else timing),**options)
                         if packet_lattice else LatticeImuBuffer(**options))
                 mode_text=f'帧格点 {buffer.sample_rate_hz:.1f} Hz · {lattice_reference}'
             else:
                 buffer=CandidateImuBuffer(camera_to_imu_lag_ns=round(lag_ms*1e6))
                 mode_text=f'时间戳偏移 {lag_ms:+.1f} ms'
+            effective_timing={'imu_enabled':self.use_imu,'alignment':alignment,
+                'lattice_reference':lattice_reference,'drift_ppm':drift_ppm,
+                'camera_to_imu_lag_ms':lag_ms,'image_scale':image_scale,
+                'phase_ns':buffer.phase_ns if self.use_imu and packet_lattice else None,
+                'sample_rate_hz':getattr(buffer,'sample_rate_hz',None),
+                'phase_source':'pending_session_verification' if phase_auto else 'configured_candidate'}
+            live_config=live_hand_config(descriptor,camera_geometry,self.mode,effective_timing)
             previous=None
+            if phase_auto:
+                from .session_phase import SessionPhasePreparation
+                camera=geometry.rectifier.P1[:3,:3].copy();camera[:2]*=image_scale
+                baseline=-geometry.rectifier.P2[0,3]/geometry.rectifier.P2[0,0]
+                phase_preparation=SessionPhasePreparation(camera,baseline,geometry.T_imu_from_orb_left[:3,:3].T)
             if self.stop_event.is_set():return
-            if self.defer_imu:self.source.enable_imu_capture(allow_running=True)
+            if self.use_imu and self.defer_imu:self.source.enable_imu_capture(allow_running=True)
             self.ready=True
             self.ready_event.set()
-            self.on_status({'type':'status','message':f'ORB-SLAM3 已就绪，等待双目与 IMU · {mode_text}（实验）'})
+            self.on_status({'type':'status','mode':self.mode,'message':(f'ORB-SLAM3 已就绪，等待双目与 IMU · {mode_text}（实验）' if self.use_imu else '纯双目视觉已就绪，等待图像')})
 
             def pull_imu(packets):
                 """从独立 IMU 队列取一个 SDK 包；返回是否取到。"""
@@ -204,7 +430,9 @@ class LiveVio:
                     imu_raw.write(payload);imu_raw_count+=1
                 try:added=buffer.add(payload,imu_device_ts) if packet_lattice else buffer.add(payload)
                 except OverflowError:
-                    buffer.reset();previous=None
+                    if phase_preparation is not None:
+                        raise RuntimeError('时序核验期间 IMU 缓冲溢出，请重新准备设备')
+                    buffer.reset();previous=None;localization.reset_imu_alignment()
                     self.on_status({'type':'status','message':'IMU 缓冲溢出，已重建对齐并等待下一帧'})
                     return False
                 if not self.motion_event.is_set():
@@ -215,16 +443,16 @@ class LiveVio:
                 return True
 
             while not self.stop_event.is_set():
-                t_frame=time.perf_counter()
-                try:frame=self.frames.get(timeout=.1)
+                try:frame,submitted_ns,dequeued_ns=self._take_frame(timeout=.1)
                 except queue.Empty:continue
-                t_dequeued=time.perf_counter()
                 stamp=int(frame.metadata['sdk_device_timestamp_raw'])*1000 # 实测帧增量对应微秒；尚未获厂商说明。
                 span_s=max(0.0,(stamp-previous)/1e9) if previous is not None else 0.0
                 deadline=time.monotonic()+min(max(.6,span_s+.5),8.0)
                 imu_sdk_packets=[]
                 if previous is not None and stamp<=previous:raise ValueError('相机设备时间非递增')
-                if packet_lattice:
+                if not self.use_imu:
+                    measurements=[]
+                elif packet_lattice:
                     while buffer.covered_until_ns<stamp and not self.stop_event.is_set() and time.monotonic()<deadline:
                         pull_imu(imu_sdk_packets)
                     if self.stop_event.is_set():break
@@ -235,7 +463,7 @@ class LiveVio:
                     try:measurements=[] if previous is None else buffer.interval(previous,stamp)
                     except ValueError as exc:
                         self.on_status({'type':'status','message':str(exc)+'，重建对齐'})
-                        previous=None
+                        previous=None;localization.reset_imu_alignment()
                         continue
                 elif alignment=='lattice':
                     need=0 if previous is None else buffer.expected(previous,stamp)
@@ -243,7 +471,7 @@ class LiveVio:
                         pull_imu(imu_sdk_packets)
                     if buffer.pending()<need:
                         self.on_status({'type':'status','message':f'IMU 样本不足（需要 {need}，可用 {buffer.pending()}），重建对齐'})
-                        buffer.reset();previous=None;continue
+                        buffer.reset();previous=None;localization.reset_imu_alignment();continue
                     if previous is None:
                         # 首帧不按时间戳裁剪（相机与 IMU 的标签域可能相差数秒）：
                         # 丢弃首帧之前已在缓冲里的样本，从首帧之后到达的样本开始计数对齐。
@@ -256,26 +484,70 @@ class LiveVio:
                         pull_imu(imu_sdk_packets)
                     if buffer.last_b<stamp:continue
                     measurements=[] if previous is None else buffer.interval(previous,stamp)
+                imu_ready_ns=time.perf_counter_ns()
                 left,right=geometry.rectifier.remap_pair(frame.right_image,frame.left_image)
                 left=np.ascontiguousarray(cv2.cvtColor(left,cv2.COLOR_BGR2GRAY));right=np.ascontiguousarray(cv2.cvtColor(right,cv2.COLOR_BGR2GRAY))
                 if image_scale!=1.0:
                     left=cv2.resize(left,None,fx=image_scale,fy=image_scale,interpolation=cv2.INTER_AREA)
                     right=cv2.resize(right,None,fx=image_scale,fy=image_scale,interpolation=cv2.INTER_AREA)
-                t_rect=time.perf_counter()
-                _send_tracking_frame(self.sock,stamp,left,right,measurements)
+                rectified_ns=time.perf_counter_ns()
+                if phase_preparation is not None:
+                    verified=phase_preparation.process(stamp,left,right,buffer)
+                    if verified is not None:
+                        buffer.rephase_before_tracking(round(verified['phase_ms']*1e6))
+                        effective_timing={**effective_timing,'phase_ns':buffer.phase_ns,
+                            'phase_source':'independently_verified_session',
+                            'verification_sha256':hashlib.sha256(json.dumps(verified,sort_keys=True,
+                                allow_nan=False).encode()).hexdigest()}
+                        live_config=live_hand_config(descriptor,camera_geometry,self.mode,effective_timing)
+                        model={'type':'session_phase','schema_version':1,
+                               'config_hashes':config.describe()['hashes'],
+                               'verified_at_device_ns':stamp,'verification':verified,
+                               'message':f"本次时序已确认 {verified['phase_ms']:+d} ms · 等待 IMU 初始化"}
+                        log_path.with_name(log_path.stem+'_session_phase.json').write_text(
+                            json.dumps(model,ensure_ascii=False,indent=2),encoding='utf8')
+                        self.on_status(model)
+                        phase_preparation.close();phase_preparation=None
+                    else:
+                        self.on_status({'type':'status','message':phase_preparation.message})
+                    # Always use a fresh frame after asynchronous verification completes.
+                    continue
+                _send_tracking_frame(self.sock,stamp,left,right,measurements,
+                    recovery_protocol=recovery_protocol,
+                    reset_imu_alignment=localization.take_imu_alignment_reset())
                 result=self._read_message()
-                t_vio=time.perf_counter()
-                if result.get('type')=='error':raise RuntimeError(result.get('message'))
+                worker_return_ns=time.perf_counter_ns()
+                if result.get('type')=='error':
+                    worker_failed=True
+                    if result.get('code')=='VIO_NUMERICAL_FAULT' and result.get('recoverable') is True:
+                        raise ConnectionError(result.get('message'))
+                    raise RuntimeError(result.get('message'))
                 if result.get('matrix') is not None:
                     result['matrix']=(np.array(result['matrix'])@geometry.T_orb_left_from_gui_left).tolist()
-                result=quality.check(result)
-                result['imu_alignment']=alignment
-                if alignment=='lattice':
+                result=localization.process(result,measurements)
+                result['live_capture']=live_capture_binding(frame,self.source_session_id)
+                result['live_config']=dict(live_config)
+                admitted_ns=time.perf_counter_ns()
+                result['runtime_performance']={
+                    'schema_version':1,'clock':'host_perf_counter_ns',
+                    'scope':'LiveVio submit to application admission; excludes capture/decode before submit and GUI/hands/recording after admission',
+                    'exposure_latency_verified':False,
+                    'timing_ms':{
+                        'queue_residence':(dequeued_ns-submitted_ns)/1e6,
+                        'imu_alignment_wait':(imu_ready_ns-dequeued_ns)/1e6,
+                        'rectification':(rectified_ns-imu_ready_ns)/1e6,
+                        'worker_roundtrip':(worker_return_ns-rectified_ns)/1e6,
+                        'admission':(admitted_ns-worker_return_ns)/1e6,
+                        'submit_to_admission':(admitted_ns-submitted_ns)/1e6},
+                    'frame_queue':self.frame_queue_stats(),
+                    'frame_queue_capacity':1,'frame_queue_policy':'replace_oldest_pending'}
+                result['imu_alignment']=alignment if self.use_imu else 'disabled'
+                if self.use_imu and alignment=='lattice':
                     result['imu_lattice']={'pending':buffer.pending(),'consumed':buffer.consumed,
                                            'gap_events':buffer.gap_events,'rate_hz':buffer.sample_rate_hz,
                                            'drift_ppm':drift_ppm,'reference':lattice_reference}
                     if packet_lattice:result['imu_lattice']['phase_ms']=buffer.phase_ns/1e6
-                else:
+                elif self.use_imu:
                     result['camera_to_imu_lag_ms']=lag_ms
                 md=frame.metadata
                 result['sdk_timestamp_audit']={
@@ -294,10 +566,13 @@ class LiveVio:
                     'imu_sdk_packet_times':imu_sdk_packets,
                     'imu_raw_archive_path':str(imu_raw_path) if imu_raw_path else None,
                     'imu_raw_archive_records_written':int(imu_raw_count),
-                    'timing_ms':{'queue':round((t_dequeued-t_frame)*1e3,1),
-                                 'drain':round((t_rect-t_dequeued)*1e3,1),
-                                 'orb':round((t_vio-t_rect)*1e3,1),
-                                 'total':round((t_vio-t_frame)*1e3,1)},'image_scale':image_scale,'orb_config':str(timing.get('orb_config') or ''),
+                    'timing_ms':{'queue':round((dequeued_ns-submitted_ns)/1e6,1),
+                                 'drain':round((rectified_ns-dequeued_ns)/1e6,1),
+                                 'orb':round((worker_return_ns-rectified_ns)/1e6,1),
+                                 'total':round((worker_return_ns-submitted_ns)/1e6,1)},
+                    'timing_semantics_version':2,
+                    'timing_scope':'host submit to worker response; orb includes IPC; not exposure latency',
+                    'image_scale':image_scale,'orb_config':str(timing.get('orb_config') or ''),
 
                     'warning':'SDK monotonic timestamps are diagnostic only; device_ts unit/exposure semantics and IMU payload layout remain unverified.',
                 }
@@ -306,20 +581,25 @@ class LiveVio:
                 result.pop('raw_matrix',None)
                 self.on_status(result);previous=stamp
         except Exception as exc:
+            if proc is not None and isinstance(exc,(ConnectionError,EOFError,TimeoutError)):
+                worker_failed=True
+                retry=bool(self.ready and not self.stop_event.is_set())
+            if log:log.write(f'{exc}\n')
             if not self.ready:self.startup_error=str(exc)
-            if not self.stop_event.is_set():self.on_status({'type':'error','message':str(exc)})
+            if not self.stop_event.is_set() and not retry:
+                detail=f'ORB-SLAM3 连接中断，子进程日志：{worker_log}' if worker_failed else str(exc)
+                self.on_status({'type':'error','message':detail})
         finally:
+            if phase_preparation is not None:phase_preparation.close()
             # Always unblock startup waiters, including early failure/cancellation.
             self.ready_event.set()
             # 定位停止后不再积压无人消费的独立 IMU 队列，预览仍可继续。
             self.source.imu_vio_queue=None
             if self.sock:self.sock.close();self.sock=None
             if listener:listener.close()
-            if self.proc:
-                if self.stop_event.is_set() and not self.ready and self.proc.poll() is None:self.proc.terminate()
-                try:self.proc.wait(timeout=8)
-                except subprocess.TimeoutExpired:self.proc.terminate();self.proc.wait(timeout=3)
+            if self._owns_worker or (worker_failed and not self.stop_event.is_set()):self.worker.close()
             if log:log.close()
             if audit:audit.close()
             if imu_raw:
                 imu_raw.flush();imu_raw.close()
+        return retry

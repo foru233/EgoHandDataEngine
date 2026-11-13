@@ -31,8 +31,17 @@ def test_unsynced_images(tmp_path):
     f=s.read();assert not f.synchronized and not s.get_metadata().metric_capable
     s.close()
 
-def test_vendor():
-    with pytest.raises(NotImplementedError,match="真实相机适配器尚未配置"):VendorStereoSource().open()
+def test_vendor_disconnected_is_reported_without_contacting_hardware(tmp_path,monkeypatch):
+    import sys
+    from types import SimpleNamespace
+    from egohand.sources import vendor_placeholder
+    adb=tmp_path/'adb.exe';adb.touch()
+    monkeypatch.setattr(vendor_placeholder,'ADB',adb)
+    monkeypatch.setattr(vendor_placeholder,'CALIBRATION_PATH',tmp_path/'absent.yaml')
+    monkeypatch.setitem(sys.modules,'av',SimpleNamespace())
+    monkeypatch.setattr(vendor_placeholder.subprocess,'run',lambda *a,**k:SimpleNamespace(returncode=1,stdout=''))
+    with pytest.raises(RuntimeError,match='未检测到相机 ADB 设备'):
+        VendorStereoSource().open()
 
 def test_async_stop(source,tmp_path):
     w=AsyncRecorder(tmp_path/"async",source.get_metadata(),source.get_calibration())

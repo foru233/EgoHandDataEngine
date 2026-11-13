@@ -5,3 +5,8 @@ max_translation_speed_mps: 1.5
 translation_noise_allowance_m: 0.02
 max_rotation_speed_deg_s: 360.0
 rotation_noise_allowance_deg: 3.0
+
+# 实验性显示重锚会改变地图坐标；默认关闭，保留重定位的真实地图坐标。
+pose_continuity: false
+continuity_max_speed_mps: 3.0
+continuity_min_jump_m: 0.25

@@ -137,6 +137,9 @@ class StereoHandResult:
     right_detections: list[HandDetection] = field(default_factory=list)
     # 显式绑定 VIO 后才会附加，原始相机系关节保持不变。
     world_hands: dict | None = None
+    # Additive local recording output. Legacy world-reference protection stays.
+    local_motion: dict | None = None
+    segment_hands: dict | None = None
 
 def detection_from_dict(d):
     d = dict(d)

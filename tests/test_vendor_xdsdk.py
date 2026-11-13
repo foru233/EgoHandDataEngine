@@ -121,8 +121,8 @@ def test_gui_retries_startup_without_waiting_for_vio(qtbot, monkeypatch, timeout
     monkeypatch.setattr(source, 'wait_for_preview', wait_for_preview)
 
     class SlowVio:
-        def __init__(self, source, on_status):
-            pass
+        def __init__(self, source, on_status, *, worker=None, mode='stereo_inertial'):
+            assert mode == 'stereo_inertial'
 
         def start(self, *, defer_imu):
             assert defer_imu

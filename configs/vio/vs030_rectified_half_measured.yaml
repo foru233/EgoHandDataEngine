@@ -1,0 +1,45 @@
+%YAML:1.0
+---
+# VS030 半分辨率（800×600）ORB 配置：把 IMU.T_b_c1 的平移换成 PCB 实测杠杆臂的版本。
+# 与 configs/vio/vs030_rectified_half.yaml 的唯一差异是 IMU.T_b_c1 的平移：
+#   Kalibr(结果1) : (0.0207658, -0.0232512, 0.1247185) m
+#   实测(PCB)     : (0.0302087,  0.0035709, 0.0029415) m
+# 来源：标定结果/1/data3-camchain-imucam-measured.yaml → prepare_vs030_vio_geometry。
+# 该文件用于 A/B 验证，尚未替换实时配置；启用前请确认 y/z 符号。
+File.version: "1.0"
+Camera.type: "Rectified"
+Camera1.fx: 198.33122481606512
+Camera1.fy: 198.33122481606512
+Camera1.cx: 361.74285900807257
+Camera1.cy: 325.5916970055339
+Camera.width: 800
+Camera.height: 600
+Camera.fps: 30
+Camera.RGB: 0
+Stereo.b: 0.06554777944909011
+Stereo.ThDepth: 60.0
+IMU.NoiseGyro: 8.5e-05
+IMU.NoiseAcc: 0.0012
+IMU.GyroWalk: 4e-05
+IMU.AccWalk: 0.0001
+IMU.Frequency: 480.0
+ORBextractor.nFeatures: 1200
+ORBextractor.scaleFactor: 1.2
+ORBextractor.nLevels: 8
+ORBextractor.iniThFAST: 20
+ORBextractor.minThFAST: 7
+Viewer.KeyFrameSize: 0.05
+Viewer.KeyFrameLineWidth: 1.0
+Viewer.GraphLineWidth: 0.9
+Viewer.PointSize: 2.0
+Viewer.CameraSize: 0.08
+Viewer.CameraLineWidth: 3.0
+Viewer.ViewpointX: 0.0
+Viewer.ViewpointY: -0.7
+Viewer.ViewpointZ: -1.8
+Viewer.ViewpointF: 500.0
+IMU.T_b_c1: !!opencv-matrix
+   rows: 4
+   cols: 4
+   dt: f
+   data: [ 0.9999718276369503, -0.002954445035934449, -0.006900375855449765, 0.03020867625353886, -0.0029573513267565367, -0.9999955425607681, -0.000411013047031384, 0.0035708526012930416, -0.006899130781987197, 0.00043140830351383894, -0.9999761076552419, 0.0029414606420476793, 0.0, 0.0, 0.0, 1.0 ]

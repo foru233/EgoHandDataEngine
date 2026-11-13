@@ -2,6 +2,7 @@
 import sys
 from pathlib import Path
 import time
+from collections import OrderedDict
 import numpy as np
 import yaml
 from PySide6.QtCore import Qt, QTimer, Signal
@@ -14,7 +15,8 @@ from egohand.gui.shared.presentation import display_stereo,clear_stereo
 from egohand.gui.theme import THEMES,stylesheet
 from egohand.gui.vio_panel import VioPanel
 from egohand.vio.live_runtime import LiveVioWorker
-from egohand.storage.replay import load_recorded_results
+from egohand.vio.local_segments import consumer_display_pose as consumer_map_pose,display_reference_key
+from egohand.storage.replay import load_recorded_results,SavedResultReplay
 from egohand.visualization.display_smoothing import DisplaySmoother
 
 sys.path.insert(0,str(Path(__file__).resolve().parent))
@@ -34,8 +36,10 @@ QPushButton#start{border-color:#5FE0C5;color:#5FE0C5;font-weight:600;}'''
 
 
 class ClientMainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, *, recovery_profile=None, replay_output_dir=None):
         super().__init__();self.setWindowTitle('EgoHand DELIVERY · 客户交付版 · VS030')
+        self.recovery_profile=recovery_profile;self.replay_output_dir=replay_output_dir
+        if recovery_profile:self.setWindowTitle('EgoHand · '+recovery_profile.label)
         area=self.screen().availableGeometry();self.resize(min(1600,area.width()-40),min(950,area.height()-60));self.setMinimumSize(900,620)
         self.session=SessionController(self);self.latest=None;self.recording=False;self.pending_record=False
         self.paused=False;self._paused_vio_reset=None;self._paused_vio_world=None
@@ -46,6 +50,11 @@ class ClientMainWindow(QMainWindow):
         self.recording_path=None;self.recording_source=None;self.saved=[];self.generation=0;self.depth_task=None;self.depth_at=0
         self.last_frame_at=0;self.current_frame=None;self.last_status='未连接';self._closing=False
         self._pose_fitted=False;self._world_pose=None;self._has_native=None
+        # Bounded same-session display join; never use the newest pose for a different hand frame.
+        self._hand_poses=OrderedDict();self._hand_pose_world=None
+        self._displayed_hand_stamp=None;self._displayed_hands=None
+        self._displayed_hand_has_pose=False
+        self.saved_replay=None
         self.smoother=DisplaySmoother(yaml.safe_load((ROOT/'configs/app.yaml').read_text(encoding='utf8')).get('display_smoothing'))
         self.image_aspect=4/3
         self.depth_cache=DepthCache()
@@ -73,8 +82,11 @@ class ClientMainWindow(QMainWindow):
         selection=QHBoxLayout();selection.setSpacing(6);actions=QHBoxLayout();actions.setSpacing(6)
         toolbar.addLayout(selection);toolbar.addStretch();toolbar.addLayout(actions)
         self.source=QComboBox();self.source.setAccessibleName('数据源');self.source.addItem('VS030 设备','vendor');self.source.addItem('录制回放','recorded');self.source.addItem('合成演示（非实测）','synthetic')
-        self.mode=QComboBox();self.mode.setAccessibleName('定位算法');self.mode.addItem('双目＋IMU · 当前修复版','stereo_inertial');self.mode.addItem('纯双目视觉 · 当前版本','stereo')
+        self.mode=QComboBox();self.mode.setAccessibleName('定位算法');self.mode.addItem('双目＋IMU · 正式 DLL','stereo_inertial');self.mode.addItem('纯双目视觉 · 正式 DLL','stereo')
         self.mode.addItem('混合 · VIO优先 / 视觉回退','hybrid')
+        if self.recovery_profile:
+            self.source.clear();self.source.addItem('录制回放 · 离线候选','recorded')
+            self.mode.clear();self.mode.addItem('双目＋IMU · 恢复候选 v4','stereo_inertial')
         self.mode.setToolTip('混合模式只运行一个IMU_STEREO实例；允许视觉先建图，IMU初始化并通过门控后优先使用VIO。定位精度仍待验收，仅停止后切换。')
         self.source.setMinimumWidth(120);self.mode.setMinimumWidth(150)
         selection.addWidget(self.source);selection.addWidget(self.mode)
@@ -88,6 +100,9 @@ class ClientMainWindow(QMainWindow):
         self.record_button=self._button('开始录制',self.toggle_recording);actions.addWidget(self.record_button)
         self.capture_button=self._button('截图',self.save_screenshot);actions.addWidget(self.capture_button);layout.addLayout(toolbar)
         self.source_label=QLabel('选择数据源后启动。');self.source_label.setObjectName('compactMeta');self.source_label.setWordWrap(True);layout.addWidget(self.source_label)
+        if self.recovery_profile:
+            self.profile_label=QLabel(self.recovery_profile.label+' · 仅处理离线录制')
+            self.profile_label.setWordWrap(True);layout.addWidget(self.profile_label)
 
         # 三列：左 3D（吸收多余空间）、中 深度/校正左/校正右（单列）、右 原始左右。
         self.columns=QWidget();self.column_layout=QHBoxLayout(self.columns)
@@ -103,7 +118,7 @@ class ClientMainWindow(QMainWindow):
 
         self.result_slider=QSlider(Qt.Horizontal);self.result_slider.setAccessibleName('已有结果帧');self.result_slider.hide();self.result_slider.valueChanged.connect(self.display_saved);layout.addWidget(self.result_slider)
         self.footer=QLabel('相机 —   ·   定位 —   ·   手部 —   ·   FPS —');self.footer.setObjectName('compactMeta');self.footer.setSizePolicy(QSizePolicy.Ignored,QSizePolicy.Preferred);layout.addWidget(self.footer)
-        self.statusBar().showMessage('就绪 · VIO 为当前修复版，尚无独立定位精度验收')
+        self.statusBar().showMessage('就绪 · 定位精度尚待验收')
 
     def _world_panel(self):
         """左列：一个三维视图，同时显示相机位姿、轨迹与手部位姿。"""
@@ -180,7 +195,7 @@ class ClientMainWindow(QMainWindow):
             try:points.extend(np.asarray(item.pos))
             except (AttributeError,TypeError):pass
         self._pose_fitted=False
-        fit_view(self.preview,points)
+        self.preview.fit_geometry(points)
 
     # ---------- 状态与控制 ----------
     def set_status(self,text):
@@ -194,6 +209,8 @@ class ClientMainWindow(QMainWindow):
     def sync_controls(self):
         running=bool(self.session.worker and self.session.worker.isRunning())
         for w in (self.source,self.mode,self.open_button,self.results_button,self.start_button):w.setEnabled(not running)
+        if self.recovery_profile:
+            self.source.setEnabled(False);self.mode.setEnabled(False)
         self.stop_button.setEnabled(running);self.record_button.setEnabled(running and self.source.currentData()!='recorded' and not self.pending_record)
         self.pause_button.setEnabled(running and not self.session.worker.stop_event.is_set())
         self.pause_button.setText('恢复' if self.paused else '暂停')
@@ -205,31 +222,39 @@ class ClientMainWindow(QMainWindow):
         if path:self.select_recording(path)
 
     def select_recording(self,path):
-        self.recording_source=Path(path);self.source.setCurrentIndex(self.source.findData('recorded'));self.source_label.setText('录制：'+str(path)+' · 按录制快照重新计算')
+        self.recording_source=Path(path);self.source.setCurrentIndex(self.source.findData('recorded'));self.source_label.setText('录制：'+str(path)+(' · 全分辨率恢复候选' if self.recovery_profile else ' · 按录制快照重新计算'))
 
     def start_pipeline(self):
         if not self.stop_pipeline():return
         try:
             kind=self.source.currentData();self.last_error=None
+            if self.recovery_profile and (kind!='recorded' or self.mode.currentData()!='stereo_inertial'):
+                raise ValueError('离线恢复候选仅支持双目＋IMU录制回放')
             if kind=='recorded' and not self.recording_source:raise ValueError('请先导入录制目录')
+            output=Path(self.replay_output_dir) if self.replay_output_dir else DELIVERY_ROOT/'sessions'/('replay_'+str(time.time_ns()))
+            options={'vio_worker':self.live_vio_worker}
+            if self.recovery_profile:options=self.recovery_profile.worker_options(self.recording_source,output)
             source=create_source(SourceRequest(kind=kind,path=str(self.recording_source or ''),loop=False))
             detector=yaml.safe_load((ROOT/'configs/detector.yaml').read_text(encoding='utf8')) if kind!='synthetic' else None
             if detector:detector['model_path']=str(ROOT/detector['model_path'])
             config=yaml.safe_load((ROOT/'configs/stereo.yaml').read_text(encoding='utf8'))
             self.generation+=1;self.smoother.reset();self._pose_fitted=False;self.latest=None;self.saved=[];self.result_slider.hide();self.last_frame_at=0
             self._world_pose=None;self._has_native=None;self._raw_cache=None;self._raw_shown=None
+            self._hand_poses.clear();self._hand_pose_world=None
+            self._displayed_hand_stamp=None;self._displayed_hands=None
             clear_stereo(self.left_view,self.right_view);clear_stereo(self.depth_view)
             clear_stereo(self.raw_left_view,self.raw_right_view)
             self.left_tile.set_caption('校正 · 左');self.right_tile.set_caption('校正 · 右')
             self.raw_left_tile.set_caption('原始 · 左');self.raw_right_tile.set_caption('原始 · 右')
             self.hand_overlay.clear();self.vio_panel.clear();self.vio_panel.begin_live()
-            self.session.start(source,config=config,detector_config=detector,offline=kind=='recorded',live_vio=kind!='synthetic',vio_mode=self.mode.currentData(),vio_worker=self.live_vio_worker,vio_output_dir=DELIVERY_ROOT/'sessions'/('replay_'+str(time.time_ns())))
+            self.session.start(source,config=config,detector_config=detector,offline=kind=='recorded',live_vio=kind!='synthetic',vio_mode=self.mode.currentData(),vio_output_dir=output,vio_worker=options.pop('vio_worker'),**options)
             self.world_meta.setText('合成演示不运行定位' if kind=='synthetic' else '等待定位初始化')
             self.set_status('正在准备');self.sync_controls()
         except Exception as exc:self.show_error(str(exc));self.sync_controls()
 
     def stop_pipeline(self):
         if not self.session.stop():self.show_error('后台仍在停止，请稍后重试');return False
+        if self.saved_replay is not None:self.saved_replay.close();self.saved_replay=None
         self.generation+=1;self.recording=False;self.pending_record=False;self.paused=False;self._paused_vio_reset=None;self._paused_vio_world=None;self.sync_controls()
         if not self._closing:self.set_status('已停止')
         return True
@@ -243,6 +268,7 @@ class ClientMainWindow(QMainWindow):
             # In-flight depth work belongs to the pre-pause display generation.
             self.generation+=1
             self._paused_vio_world=self.vio_panel._live_map_epoch
+            self._hand_poses.clear();self._displayed_hand_stamp=None
             self.set_status('已暂停')
         else:
             self.smoother.reset()
@@ -270,7 +296,7 @@ class ClientMainWindow(QMainWindow):
             if message.get('type')=='vio_reset':self._paused_vio_reset=dict(message)
             elif message.get('type')=='pose':
                 from egohand.vio.map_identity import world_identity
-                world=world_identity(message)
+                world=display_reference_key(message)
                 if world is not None and self._paused_vio_world is not None and world!=self._paused_vio_world:
                     self._paused_vio_reset={'type':'vio_reset','message':'暂停期间地图坐标发生变化'}
                 if world is not None:self._paused_vio_world=world
@@ -279,20 +305,37 @@ class ClientMainWindow(QMainWindow):
         # 视觉/VIO来源切换仅断开显示线段，不代表底层地图或世界坐标已重置。
         self.vio_panel.update_live(message)
         if message.get('type')=='pose':
-            if message.get('pose_valid') and message.get('matrix') is not None:
-                from egohand.vio.trajectory import rigid_transform
-                try:self._world_pose=rigid_transform(message['matrix'])
-                except (TypeError,ValueError,IndexError):self._world_pose=None
-            else:self._world_pose=None
+            from egohand.vio.map_identity import world_identity
+            world=display_reference_key(message)
+            if world!=self._hand_pose_world:
+                self._hand_poses.clear();self._hand_pose_world=world
+                self._world_pose=None
+                if self._displayed_hands is not None:
+                    self._show_hand_overlay(self._displayed_hands,None,require_pose='local_motion' in message)
+            stamp=message.get('timestamp_ns')
+            if type(stamp) is int and stamp>=0:
+                transform=consumer_map_pose(message,world_hands=True,expected_timestamp_ns=stamp)
+                self._hand_poses[stamp]=transform
+                self._hand_poses.move_to_end(stamp)
+                while len(self._hand_poses)>64:self._hand_poses.popitem(last=False)
+                # VIO may finish after hand processing. Refresh only that exact displayed frame.
+                if stamp==self._displayed_hand_stamp and not self._displayed_hand_has_pose:
+                    self._world_pose=transform
+                    self._show_hand_overlay(self._displayed_hands or [],transform,require_pose='local_motion' in message)
         elif message.get('type') in ('vio_reset','status','error'):
             self._world_pose=None;self.hand_overlay.clear()
+            self._hand_poses.clear();self._hand_pose_world=None;self._displayed_hand_stamp=None
         if message.get('type')=='pose' and message.get('mode')=='hybrid':
             source=('VIO · 惯性优化已确认' if message.get('pose_source')=='vio'
                     else '视觉引导 · '+str(message.get('fallback_reason') or '惯性位姿暂不可用'))
-            self.world_meta.setText('混合 · '+source+(' · 跟踪中' if message.get('pose_valid') else ' · 等待稳定跟踪'))
+            self.world_meta.setText('混合 · '+source+(' · 跟踪中' if consumer_map_pose(message) is not None else ' · 等待稳定跟踪'))
             return
         if message.get('type')=='pose':
-            self.world_meta.setText('世界轨迹 · '+('跟踪中' if message.get('pose_valid') else '等待稳定跟踪'))
+            self.world_meta.setText('世界轨迹 · '+('跟踪中' if consumer_map_pose(message) is not None else '等待稳定跟踪'))
+            motion=message.get('local_motion') or {}
+            if 'local_motion' in message:
+                self.world_meta.setText(f'局部段 {motion.get("segment_index","—")} · '
+                    +('跟踪中' if consumer_map_pose(message) is not None else '定位不可用 · 手部保留相机坐标'))
         else:
             text=message.get('message')
             if text:self.world_meta.setText(str(text))
@@ -314,7 +357,8 @@ class ClientMainWindow(QMainWindow):
             self._show_native_frame(frame)
             pose=result.diagnostics.get('vio_pose')
             if pose:self.on_vio(pose)
-            self.hand_overlay.update(shown.hands,self._world_pose)
+            self._bind_displayed_hands(shown.hands,result)
+            self._show_hand_overlay(shown.hands,self._world_pose,require_pose=isinstance(pose,dict) and 'local_motion' in pose)
             self._apply_view_toggles()
             if not self._pose_fitted:
                 points=[p.T_world_from_camera_left[:3,3] for p in self.vio_panel.poses]
@@ -338,6 +382,28 @@ class ClientMainWindow(QMainWindow):
                 else:self.depth_tile.set_caption('缺少有效双目标定，深度未启用')
         elif self.last_frame_at and time.monotonic()-self.last_frame_at>2 and self.session.worker and self.session.worker.isRunning():
             self.footer.setText('等待新画面 · 上一帧已超过 2 秒，当前相机状态待确认')
+
+    def _bind_displayed_hands(self,hands,result):
+        """Exact timestamp association inside the current SessionController worker.
+
+        This display join does not certify clock/calibration accuracy or world continuity.
+        Saved/offline frame evidence is authoritative when present, including rejection.
+        """
+        self._displayed_hand_stamp=result.timestamp_ns;self._displayed_hands=hands
+        self._displayed_hand_has_pose='vio_pose' in result.diagnostics
+        if type(result.timestamp_ns) is not int or result.timestamp_ns<0:
+            self._world_pose=None;return
+        if self._displayed_hand_has_pose:
+            self._world_pose=consumer_map_pose(result.diagnostics['vio_pose'],
+                world_hands=True,expected_timestamp_ns=result.timestamp_ns)
+        else:
+            transform=self._hand_poses.get(result.timestamp_ns)
+            self._world_pose=None if transform is None else transform.copy()
+
+    def _show_hand_overlay(self,hands,transform,*,require_pose=False):
+        # A local segment view must not interpret camera-only points as segment points.
+        if require_pose and transform is None:self.hand_overlay.clear()
+        else:self.hand_overlay.update(hands,transform)
 
     def _show_native_frame(self,frame):
         """中列：未经校正的原始鱼眼图像，按设备输出原样显示。
@@ -402,6 +468,13 @@ class ClientMainWindow(QMainWindow):
             clear_stereo(self.left_view,self.right_view);clear_stereo(self.depth_view)
             clear_stereo(self.raw_left_view,self.raw_right_view)
             self.hand_overlay.clear();self.vio_panel.clear()
+            try:
+                replay=SavedResultReplay(path,self.saved);replay.open();replay.start()
+                self.saved_replay=replay
+            except (OSError,ValueError,KeyError) as exc:
+                if 'replay' in locals():replay.close()
+                self.saved_replay=None
+                self.source_label.setText('原始图像不可用：'+str(exc)+' · 可继续查看三维结果')
             self.result_slider.setRange(0,len(self.saved)-1);self.result_slider.setValue(0);self.result_slider.show();self.display_saved(0)
             self.set_status('已有结果回看'+(' · 尾部不完整' if truncated else ''))
         except Exception as exc:self.show_error(str(exc))
@@ -409,19 +482,40 @@ class ClientMainWindow(QMainWindow):
     def display_saved(self,index):
         if self.saved:
             self.latest=self.saved[index]
-            self.vio_panel.clear();self.vio_panel.begin_live()
+            self.vio_panel.show_recorded(self.saved,index,show_hands=False)
             self._world_pose=None
-            for result in self.saved[:index+1]:
-                pose=result.diagnostics.get('vio_pose')
-                if pose:
-                    self.vio_panel.update_live(pose)
-                    if pose.get('pose_valid') and pose.get('matrix') is not None:
-                        from egohand.vio.trajectory import rigid_transform
-                        try:self._world_pose=rigid_transform(pose['matrix'])
-                        except (TypeError,ValueError,IndexError):self._world_pose=None
-            self.hand_overlay.update(self.latest.hands,self._world_pose)
+            self._hand_poses.clear();self._displayed_hand_stamp=None;self._displayed_hands=None
+            # The selected hand frame must not inherit an earlier camera pose.
+            self._world_pose=consumer_map_pose(self.latest.diagnostics.get('vio_pose'),
+                world_hands=True,expected_timestamp_ns=self.latest.timestamp_ns)
+            saved_pose=self.latest.diagnostics.get('vio_pose') or {}
+            self._show_hand_overlay(self.latest.hands,self._world_pose,require_pose='local_motion' in saved_pose)
             self._apply_view_toggles()
-            self.source_label.setText(f'已有结果回看 · {index+1} / {len(self.saved)} · 无对应图像时保持空白')
+            for view in (self.left_view,self.right_view,self.depth_view,self.raw_left_view,self.raw_right_view):clear_stereo(view)
+            image_status='原始图像不可用 · 三维结果可查看'
+            if self.saved_replay is not None:
+                try:
+                    from egohand.calibration.rectifier import StereoRectifier
+                    self.saved_replay.seek(index);frame=self.saved_replay.read()
+                    raw=(frame.left_image,frame.right_image)
+                    if self.latest.diagnostics.get('output_geometry')=='rectified':
+                        frame=StereoRectifier(self.saved_replay.calibration).rectify(frame)
+                    frame.debug_native_images=raw
+                    display_stereo(frame,self.latest,self.left_view,self.right_view)
+                    self._show_native_frame(frame);self._sync_aspect(frame)
+                    image_status='原始双目与保存结果同帧'
+                except (OSError,ValueError,KeyError) as exc:image_status='图像未显示：'+str(exc)
+            motion=getattr(self.latest,'local_motion',None) or {}
+            segment_text=f' · 局部段 {motion.get("segment_index","—")}' if getattr(self.latest,'local_motion',None) is not None else ''
+            self.source_label.setText(f'已有结果回看 · {index+1} / {len(self.saved)}{segment_text} · {image_status}')
+            available=self._world_pose is not None
+            self.world_meta.setText(('局部段 '+str(motion.get('segment_index','—')) if motion else '保存轨迹')+
+                (' · 位姿可用' if available else ' · 当前位姿不可用'))
+            hands=sum(h.valid_joint_count>0 for h in self.latest.hands)
+            source=motion.get('pose_source') or saved_pose.get('mode') or '来源未知'
+            self.footer.setText(f'保存结果 · {source}   ·   相机系手部 {hands}   ·   '+
+                ('局部坐标可用' if available else '局部坐标不可用')+f'   ·   帧 {getattr(self.latest,"frame_id","—")}')
+            self.reset_world_view()
 
     def _sync_aspect(self,frame):
         """用实际图像宽高比排版，图像区块不会出现明显黑边。"""

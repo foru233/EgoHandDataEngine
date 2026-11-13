@@ -1,0 +1,86 @@
+--- a/include/Tracking.h
++++ b/include/Tracking.h
+@@ -40,6 +40,8 @@
+ #include "GeometricCamera.h"
+ 
+ #include <mutex>
++#include <functional>
++#include <utility>
+ #include <unordered_set>
+ 
+ namespace ORB_SLAM3
+@@ -107,6 +109,9 @@
+     void SaveSubTrajectory(string strNameFile_frames, string strNameFile_kf, Map* pMap);
+ 
+     float GetImageScale();
++    void SetRecoveryCandidateCheck(std::function<int(const Eigen::Matrix4f&, unsigned long long)> check) {
++        mRecoveryCandidateCheck = std::move(check);
++    }
+ 
+ #ifdef REGISTER_LOOP
+     void RequestStop();
+@@ -212,6 +217,8 @@
+     bool PredictStateIMU();
+ 
+     bool Relocalization();
++    // Return 1 for consistent, 0 for reject, -1 for unavailable.
++    std::function<int(const Eigen::Matrix4f&, unsigned long long)> mRecoveryCandidateCheck;
+ 
+     void UpdateLocalMap();
+     void UpdateLocalPoints();
+--- a/include/System.h
++++ b/include/System.h
+@@ -179,6 +179,7 @@
+     int GetTrackingState();
+     bool GetLatestInertialBodyState(Eigen::Matrix4f& Twb, Eigen::Vector3f& velocity,
+                                     Eigen::Matrix<float,6,1>& bias, bool& ba2);
++    void SetRecoveryCandidateCheck(std::function<int(const Eigen::Matrix4f&, unsigned long long)> check);
+     std::vector<MapPoint*> GetTrackedMapPoints();
+     std::vector<cv::KeyPoint> GetTrackedKeyPointsUn();
+ 
+--- a/src/System.cc
++++ b/src/System.cc
+@@ -1337,6 +1337,11 @@
+     return mTrackingState;
+ }
+ 
++void System::SetRecoveryCandidateCheck(std::function<int(const Eigen::Matrix4f&, unsigned long long)> check)
++{
++    mpTracker->SetRecoveryCandidateCheck(std::move(check));
++}
++
+ bool System::GetLatestInertialBodyState(Eigen::Matrix4f& Twb, Eigen::Vector3f& velocity,
+                                         Eigen::Matrix<float,6,1>& bias, bool& ba2)
+ {
+--- a/src/Tracking.cc
++++ b/src/Tracking.cc
+@@ -3837,13 +3837,25 @@
+                 if(nGood>=50)
+                 {
+                     double dRelocTrans = 0.0, dRelocRot = 0.0;
+-                    if(!reloc_consistent(mCurrentFrame.GetPose(), dRelocTrans, dRelocRot))
++                    int recoveryDecision = -1;
++                    if (mRecoveryCandidateCheck && bInertialSensor && mCurrentFrame.mImuCalib.mbIsSet)
++                    {
++                        const Sophus::SE3f TwbCandidate = mCurrentFrame.GetPose().inverse() * mCurrentFrame.mImuCalib.mTcb;
++                        recoveryDecision = mRecoveryCandidateCheck(TwbCandidate.matrix(), mpSystem->GetMapEpoch());
++                    }
++                    const bool rejectCandidate = mRecoveryCandidateCheck
++                        ? (recoveryDecision == 0)
++                        : !reloc_consistent(mCurrentFrame.GetPose(), dRelocTrans, dRelocRot);
++                    if(rejectCandidate)
+                     {
+                         vbDiscarded[i] = true;
+                         nCandidates--;
+-                        cout << "Relocalization rejected by IMU check: translation "
+-                             << dRelocTrans << " m, rotation " << dRelocRot
+-                             << " deg over " << dRelocGap << " s" << endl;
++                        if(mRecoveryCandidateCheck)
++                            cout << "Relocalization rejected by full-interval recovery check" << endl;
++                        else
++                            cout << "Relocalization rejected by IMU check: translation "
++                                 << dRelocTrans << " m, rotation " << dRelocRot
++                                 << " deg over " << dRelocGap << " s" << endl;
+                         continue;
+                     }
+                     bMatch = true;

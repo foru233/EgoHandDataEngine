@@ -1,0 +1,39 @@
+%YAML:1.0
+---
+File.version: "1.0"
+Camera.type: "Rectified"
+Camera1.fx: 198.78851228369405
+Camera1.fy: 198.78851228369405
+Camera1.cx: 390.3501722792632
+Camera1.cy: 324.93513190422027
+Camera.width: 800
+Camera.height: 600
+Camera.fps: 30
+Camera.RGB: 0
+Stereo.b: 0.06526853641067108
+Stereo.ThDepth: 60.0
+IMU.NoiseGyro: 8.5e-05
+IMU.NoiseAcc: 0.0012
+IMU.GyroWalk: 4e-05
+IMU.AccWalk: 0.0001
+IMU.Frequency: 480.0
+ORBextractor.nFeatures: 1200
+ORBextractor.scaleFactor: 1.2
+ORBextractor.nLevels: 8
+ORBextractor.iniThFAST: 20
+ORBextractor.minThFAST: 7
+Viewer.KeyFrameSize: 0.05
+Viewer.KeyFrameLineWidth: 1.0
+Viewer.GraphLineWidth: 0.9
+Viewer.PointSize: 2.0
+Viewer.CameraSize: 0.08
+Viewer.CameraLineWidth: 3.0
+Viewer.ViewpointX: 0.0
+Viewer.ViewpointY: -0.7
+Viewer.ViewpointZ: -1.8
+Viewer.ViewpointF: 500.0
+IMU.T_b_c1: !!opencv-matrix
+   rows: 4
+   cols: 4
+   dt: f
+   data: [ 0.9994608293576017, -0.03256691570883317, 0.0041769104645852095, -0.03485, -0.03254225753373576, -0.9994532898435514, -0.0058414805923220235, 0.00375, 0.004364865911276581, 0.005702404941444616, -0.9999742149292953, 0.00258, 0.0, 0.0, 0.0, 1.0 ]

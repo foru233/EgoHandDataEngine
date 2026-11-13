@@ -66,15 +66,17 @@ def estimate_uncertainty(P1,P2,left_uv,right_uv,R1,config=None,pixel_covariance=
     if not len(indices):return result
     obs=observations[indices]
     base=_solve(P1,P2,obs,R1)
-    # 中心差分分别扰动四个像素坐标；批量处理关节，避免逐点反复创建投影矩阵。
-    def jacobian(h):
-        J=np.empty((len(obs),3,4))
-        for k in range(4):
-            plus=obs.copy();minus=obs.copy();plus[:,k]+=h;minus[:,k]-=h
-            J[:,:,k]=(_solve(P1,P2,plus,R1)-_solve(P1,P2,minus,R1))/(2*h)
-        return J
+    # 两个步长、四个坐标和正负扰动一次批量三角化；仍逐坐标做原来的中心差分。
+    # 数组轴依次是步长、像素坐标、正负号、关节和观测坐标。
+    steps=np.array([step,step/2])
+    perturbed=np.broadcast_to(obs,(2,4,2,*obs.shape)).copy()
+    for k in range(4):
+        perturbed[:,k,0,:,k]+=steps[:,None]
+        perturbed[:,k,1,:,k]-=steps[:,None]
+    solved=_solve(P1,P2,perturbed.reshape(-1,4),R1).reshape(2,4,2,len(obs),3)
+    jacobians=((solved[:,:,0]-solved[:,:,1])/(2*steps[:,None,None,None])).transpose(0,2,3,1)
     # 用 h 和 h/2 两种步长比较稳定性，步长变小不应令导数发生显著改变。
-    coarse=jacobian(step);fine=jacobian(step/2)
+    coarse,fine=jacobians
     for k,index in enumerate(indices):
         status='DEGENERATE_GEOMETRY'
         if not np.isfinite(base[k]).all() or base[k,2]<=0:

@@ -22,6 +22,8 @@ def test_noise_propagation(engine):
 
 def test_zero_disparity(engine):
     s=SyntheticStereoSource("zero_disparity",frames=1);s.open();s.start()
+    # 启用极线约束以避免两只手发生跨手错误配对；零视差仍由几何门限拒绝。
+    engine.config['use_epipolar_error']=True
     r=engine.process(s.read())
     assert sum(h.valid_joint_count for h in r.hands)==0
 
@@ -32,13 +34,14 @@ def test_negative_depth(engine,source):
     js=JointTriangulator(r,engine.config).triangulate(b,a)
     assert all(j.status=="NEGATIVE_DEPTH" for j in js)
 
-def test_far_and_nonfinite(engine,source):
+def test_far_points_are_not_rejected_by_distance_and_nonfinite_are_rejected(engine,source):
     from dataclasses import replace
     from egohand.stereo.triangulation import JointTriangulator
     r=engine.rectifier;f=r.rectify(source.read());a,b=f.left_detections[0],f.right_detections[0]
     uv=a.pixel_landmarks.copy();uv[:,0]-=.5
     js=JointTriangulator(r,engine.config).triangulate(a,replace(b,pixel_landmarks=uv))
-    assert not any(j.valid for j in js)
+    # 默认不设置距离上下限；满足视差和几何约束的远点仍可输出。
+    assert any(j.valid for j in js)
     uv[:]=np.nan
     js=JointTriangulator(r,engine.config).triangulate(a,replace(b,pixel_landmarks=uv))
     assert not any(j.valid for j in js)

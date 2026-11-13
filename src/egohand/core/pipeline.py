@@ -5,10 +5,11 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import replace
+from itertools import product
 from pathlib import Path
 import numpy as np
 import yaml
-from .types import StereoHandResult, Hand3D, StereoFrame
+from .types import StereoHandResult, Hand3D, StereoFrame, HandDetection
 from .status import Status
 from ..calibration.rectifier import StereoRectifier
 from ..calibration.validator import CalibrationError
@@ -97,6 +98,36 @@ class EgoHandEngine:
         detections = self.detectors[side].detect(image, timestamp_ns)
         return detections, (time.perf_counter() - started) * 1000
 
+    def _associate_detection_variants(self,detections,diag,tracks,timestamp_ns):
+        """Select whole-view measured variants using the unchanged stereo gates."""
+        options=[]
+        for side,current in zip(('left','right'),detections):
+            original=(diag.get(side+'_detection_details') or {}).get('full_frame_observations')
+            valid=(isinstance(original,list) and len(original)==len(current)
+                and all(isinstance(d,HandDetection) for d in original)
+                and [d.handedness for d in original]==[d.handedness for d in current])
+            # The original view is evaluated first and wins exact ties.
+            options.append([('full_frame',original),('roi',current)] if valid else [('current',current)])
+        alternatives=[];best=None;tri_ms=0.
+        for left,right in product(*options):
+            matches,ambiguous=self.associator.associate(left[1],right[1],tracks,timestamp_ns)
+            tri_ms+=self.associator.tri.elapsed_ms
+            support=sum(sum(j.valid for j in match.joints) for match in matches)
+            # Prefer complete, unambiguous stereo hands, then valid joint support;
+            # total assignment cost breaks support ties. No GT or pose is used.
+            score=(len(matches),support,-self.associator.diagnostics.get('total_cost',0.))
+            alternatives.append({'left':left[0],'right':right[0],'accepted_pairs':len(matches),
+                'valid_joints':support,'assignment_cost':-score[2],'ambiguous':ambiguous})
+            if best is None or score>best[0]:
+                best=(score,[left[1],right[1]],matches,ambiguous,self.associator.diagnostics,left[0],right[0])
+        self.associator.diagnostics=best[4]
+        self.associator.tri.elapsed_ms=tri_ms
+        diag['stereo_detection_selection']={'method':'whole_view_original_or_roi_existing_stereo_gates',
+            'selected_left':best[5],'selected_right':best[6],'alternatives':alternatives,
+            'ground_truth_used':False,'geometry_thresholds_changed':False,
+            'absolute_accuracy_or_identity_verified':False}
+        return best[1],best[2],best[3]
+
     # 外部图像调用入口；左右时间戳、同步声明、图像是否校正都必须由调用方明确提供。
     def process_stereo(self,left_image,right_image,*,frame_id,timestamp_ns,left_timestamp_ns=None,right_timestamp_ns=None,synchronized=False,source_type="external",metadata=None,left_detections=None,right_detections=None,image_geometry="raw",calibration=None):
         """Headless external-image API. Metadata must declare provenance/evidence.
@@ -131,7 +162,7 @@ class EgoHandEngine:
         if documented_pair:diag['dataset_pairing']=dataset_pairing
         use_epi=self.config.get('use_epipolar_error',True)
         use_reproj=self.config.get('use_reprojection_error',True)
-        diag.update({"synthetic":bool(frame.metadata.get("synthetic",False)),"input_geometry":frame.image_geometry,"timestamp_kind":frame.metadata.get("timestamp_kind","unknown"),"synchronization_evidence":frame.metadata.get("synchronization_evidence"),"calibration_error":self.calibration_error,"processing_mode":frame.metadata.get("processing_mode","api"),"use_epipolar_error":use_epi,"quality_score_formula":("exp(-0.5*((epipolar/max_epipolar)^2+(reprojection/max_reprojection)^2))" if use_epi else "exp(-0.5*(reprojection/max_reprojection)^2)")+"; derived geometry, not model confidence"})
+        diag.update({"synthetic":bool(frame.metadata.get("synthetic",False)),"input_geometry":frame.image_geometry,"timestamp_kind":frame.metadata.get("timestamp_kind","unknown"),"synchronization_evidence":frame.metadata.get("synchronization_evidence"),"calibration_error":self.calibration_error,"processing_mode":frame.metadata.get("processing_mode","api"),"use_epipolar_error":use_epi})
         if user_camera_pair:diag['synchronization_evidence']='user_confirmed_hardware_sync_'+frame.metadata['transport_pairing']
         diag['use_reprojection_error']=use_reproj
         diag['quality_score_formula']='exp(-0.5*('+(' + '.join(x for x,on in [('(epipolar/max_epipolar)^2',use_epi),('(reprojection/max_reprojection)^2',use_reproj)] if on) or 'no enabled terms; score unavailable')+')); derived geometry, not model confidence'
@@ -228,7 +259,12 @@ class EgoHandEngine:
         # 先做左右手配对，再做跨帧 ID 分配；两种歧义分别记录，不能强行拼成连续轨迹。
         tracking_enabled=bool(self.config.get('enable_3d_tracking',True))
         diag['tracking_3d_enabled']=tracking_enabled
-        matches,ambiguous=self.associator.associate(*detections,self.tracks.active(frame.timestamp_ns) if tracking_enabled else (),frame.timestamp_ns)
+        tracks=self.tracks.active(frame.timestamp_ns) if tracking_enabled else ()
+        if self.config.get('stereo_refinement_selection',False):
+            detections,matches,ambiguous=self._associate_detection_variants(detections,diag,tracks,frame.timestamp_ns)
+            out.left_detections,out.right_detections=detections
+        else:
+            matches,ambiguous=self.associator.associate(*detections,tracks,frame.timestamp_ns)
         diag['association_quality']=self.associator.diagnostics
         diag["ambiguous"]=ambiguous
         diag["matching_and_triangulation_ms"]=(time.perf_counter()-tick)*1000

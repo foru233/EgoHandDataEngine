@@ -5,6 +5,95 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from client_gui import ClientMainWindow
 
 
+def test_live_hands_bind_only_exact_frame_in_either_arrival_order(qtbot):
+    import numpy as np
+    from types import SimpleNamespace
+    w=ClientMainWindow();qtbot.addWidget(w);w.vio_panel.begin_live()
+    def pose(stamp,epoch=0,valid=True):
+        matrix=np.eye(4);matrix[0,3]=stamp
+        return dict(type='pose',timestamp_ns=stamp,pose_valid=valid,tracking_state='OK',
+                    imu_initialized=True,map_epoch=epoch,matrix=matrix.tolist() if valid else None)
+    def frame(stamp,**diagnostics):
+        return SimpleNamespace(timestamp_ns=stamp,diagnostics=diagnostics)
+    try:
+        w.on_vio(pose(1))
+        w._bind_displayed_hands([],frame(2))
+        assert w._world_pose is None  # Newest available pose belongs to another frame.
+        w.on_vio(pose(2))
+        assert w._world_pose[0,3]==2  # Late exact result refreshes current hands.
+        w.on_vio(pose(3))
+        assert w._world_pose[0,3]==2  # A newer pose must not move an older hand frame.
+        w._bind_displayed_hands([],frame(3))
+        assert w._world_pose[0,3]==3
+        w._bind_displayed_hands([],frame(3,vio_pose=pose(3,valid=False)))
+        assert w._world_pose is None  # Explicit frame rejection wins over cache.
+        w.on_vio(pose(3))
+        assert w._world_pose is None  # Nor can a later callback replace that rejection.
+        w.on_vio(pose(4,epoch=1))
+        w._bind_displayed_hands([],frame(2))
+        assert w._world_pose is None  # Old world entries were discarded.
+        w.on_vio({'type':'vio_reset'})
+        w._bind_displayed_hands([],frame(4))
+        assert w._world_pose is None
+        for stamp in range(100,180):w.on_vio(pose(stamp,epoch=1))
+        assert len(w._hand_poses)==64 and 100 not in w._hand_poses
+    finally:w.close()
+
+
+def test_saved_invalid_or_unpaired_hand_frame_never_reuses_prior_pose(qtbot):
+    import numpy as np
+    from types import SimpleNamespace
+    w=ClientMainWindow();qtbot.addWidget(w)
+    transform=np.eye(4);transform[0,3]=5
+    def result(stamp,pose):
+        return SimpleNamespace(timestamp_ns=stamp,hands=[],diagnostics={'vio_pose':pose} if pose else {})
+    def pose(stamp,valid=True):
+        return dict(type='pose',timestamp_ns=stamp,pose_valid=valid,tracking_state='OK' if valid else 'LOST',
+                    map_epoch=0,imu_initialized=True,matrix=transform.tolist() if valid else None)
+    w.saved=[result(1,pose(1)),result(2,pose(2,False)),result(3,None),result(4,pose(1))]
+    try:
+        w.display_saved(0)
+        np.testing.assert_array_equal(w._world_pose,transform)
+        for index in (1,2,3):
+            w.display_saved(index)
+            assert w._world_pose is None
+        assert len(w.vio_panel.poses)==2  # Camera history is independent of current hand binding.
+    finally:w.close()
+
+
+def test_saved_unavailable_local_pose_keeps_camera_data_without_segment_overlay(qtbot):
+    import numpy as np
+    from egohand.core.types import Hand3D,StereoHandResult
+    hand=Hand3D('Right',1.,1)
+    hand.joints[0].valid=True;hand.joints[0].xyz_m=np.array([.1,.2,.3]);hand.valid_joint_count=1
+    result=StereoHandResult(7,123,'cal','vendor_vs030',hands=[hand])
+    result.local_motion={'status':'unavailable','pose_valid':False}
+    result.diagnostics['vio_pose']={'type':'pose','timestamp_ns':123,'pose_valid':False,
+        'tracking_state':'LOST','map_epoch':0,'matrix':None,'local_motion':result.local_motion}
+    w=ClientMainWindow();qtbot.addWidget(w);w.saved=[result]
+    try:
+        w.hand_overlay.update(result.hands,np.eye(4))
+        assert w.hand_overlay.has_geometry()
+        w.display_saved(0)
+        assert w._world_pose is None and not w.hand_overlay.has_geometry()
+        assert w.latest.hands[0].joints[0].valid
+        np.testing.assert_array_equal(w.latest.hands[0].joints[0].xyz_m,[.1,.2,.3])
+    finally:w.close()
+
+
+def test_customer_world_pose_obeys_contract_even_when_legacy_bit_is_true(qtbot):
+    import numpy as np
+    w=ClientMainWindow();qtbot.addWidget(w);w.vio_panel.begin_live()
+    row=dict(type='pose',timestamp_ns=1,tracking_state='OK',pose_valid=True,
+             imu_initialized=True,map_epoch=0,matrix=np.eye(4).tolist(),
+             localization={'schema_version':1,'contract_version':2,'admission':{'map_pose_available':False}})
+    try:
+        w.on_vio(row)
+        assert w._world_pose is None and not w.vio_panel.poses
+        assert '等待稳定跟踪' in w.world_meta.text()
+    finally:w.close()
+
+
 def test_customer_lifecycle_and_mode_lock(qtbot):
     w=ClientMainWindow();qtbot.addWidget(w);w.show()
     try:

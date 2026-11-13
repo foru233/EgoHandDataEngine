@@ -10,6 +10,9 @@ import yaml
 from PySide6.QtCore import Qt,QTimer,Slot,Signal,QThread
 from PySide6.QtWidgets import QMainWindow,QFileDialog,QInputDialog
 from .workers import PipelineWorker
+from .shared.session import create_worker, stop_worker
+from .shared.sources import SourceRequest, create_source
+from .shared.presentation import display_stereo, clear_stereo
 from .reconstruction_panel import DETECTOR_KEYS
 from ..sources.synthetic import SyntheticStereoSource
 from ..sources.recorded import RecordedStereoSource
@@ -22,8 +25,9 @@ from ..sources.vendor_xdsdk import XdSdkStereoSource
 from ..calibration.loader import load_calibration
 from ..calibration.rectifier import StereoRectifier
 from ..storage.exporter import export_all
-from ..storage.replay import load_recorded_results
+from ..storage.replay import load_recorded_results,SavedResultReplay
 from ..core.pipeline import ROOT
+from ..vio.live_runtime import LiveVioWorker
 
 from .workspace import build_workspace, apply_theme, sync_controls, present_result
 from ..visualization.skeleton_view import optical_to_display
@@ -75,6 +79,7 @@ class MainWindow(QMainWindow):
         self.resize(min(1500,int(available.width()*.92)),min(960,int(available.height()*.90)))
         self.setMinimumSize(min(1100,available.width()-40),min(720,available.height()-40))
         self.worker=None;self.loaded_calibration=None;self.model_path=ROOT/"models/hand_landmarker.task"
+        self.live_vio_worker=LiveVioWorker()
         self.app_config=yaml.safe_load((ROOT/"configs/app.yaml").read_text(encoding="utf-8"))
         self.display_smoother=DisplaySmoother(self.app_config.get('display_smoothing'))
         self.detector_config=yaml.safe_load((ROOT/"configs/detector.yaml").read_text(encoding="utf-8"))
@@ -91,8 +96,8 @@ class MainWindow(QMainWindow):
         self._build()
         from .mano_controller import ManoController
         self.mano_controller=ManoController(self)
-        self.reconstruction_panel.use_epipolar.setChecked(self.stereo_config.get('use_epipolar_error',True))
-        self.reconstruction_panel.use_reprojection.setChecked(self.stereo_config.get('use_reprojection_error',True))
+        self.reconstruction_panel.use_epipolar.setChecked(self.stereo_config.get('use_epipolar_error',False))
+        self.reconstruction_panel.use_reprojection.setChecked(self.stereo_config.get('use_reprojection_error',False))
         self.reconstruction_panel.use_3d_tracking.setChecked(self.stereo_config.get('enable_3d_tracking',True))
         self._active_source_index=self.source_panel.kind.currentIndex()
         self.reconstruction_panel.display_smoothing.toggled.connect(self.display_smoothing_changed)
@@ -110,7 +115,7 @@ class MainWindow(QMainWindow):
         self.source_panel.offline.setChecked(self.app_config.get("mode")=="offline")
         # 默认来源由 app.yaml 决定；下拉框变更会初始化相应路径和状态。
         source_indices={"synthetic":0,"recorded":1,"image":2,"vendor":3,"hot3d":4,"show3d":5}
-        self.source_panel.kind.setCurrentIndex(source_indices.get(self.app_config.get("source","show3d"),5))
+        self.source_panel.kind.setCurrentIndex(source_indices.get(self.app_config.get("source","vendor"),3))
         self.timer=QTimer(self);self.timer.timeout.connect(self.poll);self.timer.start(33)
     def _build(self):
         build_workspace(self)
@@ -242,14 +247,13 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("模型路径已设置，将在后台启动时验证加载")
     def make_source(self):
         kind=self.source_panel.kind.currentIndex()
-        if kind==0: return SyntheticStereoSource(self.source_panel.scenario.currentData(),frames=18000,fps=self.app_config.get("preview_fps",30))
-        path=self.source_panel.path.text()
-        if kind==1: return RecordedStereoSource(path,self.source_panel.loop.isChecked(),self.source_panel.reuse.isChecked())
-        if kind==2: return SingleImageSource(path or ROOT/"samples/public/hand.jpg")
-        if kind==4:return HOT3DSource(path,loop=self.source_panel.loop.isChecked(),view_mode=self.source_panel.hot3d_mode.currentData())
-        if kind==5:return SHOW3DSource(path or ROOT/"samples/date/SHOW3D",loop=self.source_panel.loop.isChecked(),view_mode=self.source_panel.hot3d_mode.currentData())
-        if kind==6:return DexYCBSource(path or ROOT/"samples/date/DexYCB",loop=self.source_panel.loop.isChecked())
-        return XdSdkStereoSource()
+        return create_source(SourceRequest(
+            kind={0:'synthetic',1:'recorded',2:'image',4:'hot3d',5:'show3d',6:'dexycb'}.get(kind,'vendor'),
+            path=self.source_panel.path.text(), loop=self.source_panel.loop.isChecked(),
+            reuse_detections=self.source_panel.reuse.isChecked(),
+            scenario=self.source_panel.scenario.currentData(), fps=self.app_config.get('preview_fps',30),
+            view_mode=self.source_panel.hot3d_mode.currentData(),
+        ))
     def apply_detection_settings(self):
         settings=self.reconstruction_panel.settings()
         if self.worker and self.worker.isRunning():
@@ -290,9 +294,13 @@ class MainWindow(QMainWindow):
             detector=None
             if self.source_panel.kind.currentIndex() in (1,2,3,4,5,6):
                 detector={"model_path":str(self.model_path),**{key:self.detector_config[key] for key in DETECTOR_KEYS}}
-            self.worker=PipelineWorker(source,config={k:self.stereo_config.get(k,k!='vs030_user_confirmed_sync') for k in ('use_epipolar_error','use_reprojection_error','enable_3d_tracking','vs030_user_confirmed_sync')},detector_config=detector,calibration=self.loaded_calibration,offline=self.source_panel.offline.isChecked(),parent=self,rois=self.roi_panel.settings(),live_vio=(isinstance(source,XdSdkStereoSource) and self.vio_panel.live_enabled.isChecked()))
-            if self.worker.live_vio_enabled:self.vio_panel.begin_live()
-            self.worker.vio_status.connect(self.vio_panel.update_live)
+            live_vio=isinstance(source,XdSdkStereoSource) and self.vio_panel.live_enabled.isChecked()
+            preset=(self.vio_panel.map_directory,self.vio_panel.map_manifest,
+                    self.vio_panel.map_updates,self.vio_panel.map_comparison) if live_vio and self.vio_panel.map_directory else None
+            defaults={'use_epipolar_error':False,'use_reprojection_error':False,'enable_3d_tracking':True,'vs030_user_confirmed_sync':False}
+            self.worker=create_worker(source,worker_class=PipelineWorker,config={k:self.stereo_config.get(k,v) for k,v in defaults.items()},detector_config=detector,calibration=self.loaded_calibration,offline=self.source_panel.offline.isChecked(),parent=self,rois=self.roi_panel.settings(),live_vio=live_vio,vio_worker=self.live_vio_worker,preset_map=preset)
+            if live_vio:self.vio_panel.begin_live(preset=preset is not None)
+            self.worker.vio_status.connect(self.on_vio_status)
             self.worker.error.connect(self._error);self.worker.ready.connect(self.on_ready)
             self.worker.startup_status.connect(self.on_startup_status)
             self.worker.hot3d_mode_applied.connect(self.on_hot3d_mode)
@@ -306,6 +314,9 @@ class MainWindow(QMainWindow):
             self.banner.setText("Running · 正在初始化数据源")
             sync_controls(self)
         except Exception as e:self._error(str(e))
+    @Slot(dict)
+    def on_vio_status(self,message):
+        if self._current_worker_signal():self.vio_panel.update_live(message)
     @Slot(str)
     def on_startup_status(self,message):
         if self._current_worker_signal() and self.worker and not self.worker.stop_event.is_set():
@@ -324,6 +335,7 @@ class MainWindow(QMainWindow):
     @Slot()
     def on_worker_finished(self):
         if not self._current_worker_signal() or self.worker is None:return
+        self.vio_panel.set_map_controls_enabled(True)
         # 先呈现最后一帧，再标记结束；保留已退出线程的缓存供导出和单帧查看。
         self.poll()
         self.saved_results=list(self.worker.history) or self.saved_results
@@ -335,6 +347,8 @@ class MainWindow(QMainWindow):
         else:self.banner.setText('Stopped · 数据处理已结束')
         if self.worker.live_vio_enabled and not self.vio_panel.details.text().startswith('实时 VIO 已停止'):
             self.vio_panel.details.setText('实时 VIO 已停止 · 保留最后一段轨迹供查看')
+        if self.worker.live_vio_enabled:
+            self.vio_panel.live_pose_readout.emit('相机 6D 位姿 · 实时 VIO 已停止')
         sync_controls(self)
     @Slot(dict)
     def on_ready(self,info):
@@ -381,8 +395,7 @@ class MainWindow(QMainWindow):
 
     def stop_pipeline(self):
         if self.worker:
-            self.worker.stop()
-            if not self.worker.wait(15000):
+            if not stop_worker(self.worker):
                 self._error("后台线程尚未退出，请检查数据源读取超时")
                 return False
             self.saved_results=list(self.worker.history) or self.saved_results
@@ -605,7 +618,7 @@ class MainWindow(QMainWindow):
         try:
             results,truncated=load_recorded_results(path)
             if not results:raise ValueError('录制目录没有可回放的处理结果')
-            replay=RecordedStereoSource(path,reuse_detections=True)
+            replay=SavedResultReplay(path,results)
             replay.open();replay.start()
             index={(int(row["frame_id"]),int(row["timestamp_ns"])):i for i,row in enumerate(replay.rows)}
             rectifier=StereoRectifier(replay.calibration) if replay.calibration else None
@@ -620,10 +633,9 @@ class MainWindow(QMainWindow):
             self._error(str(e))
     def _clear_replay_images(self):
         self._debug_frame=None
+        clear_stereo(self.left_view,self.right_view)
         for view,card in ((self.left_view,self.left_card),(self.right_view,self.right_card)):
-            view.set_roi_selection(False)
-            view.pix=None;view.last_bgr=None;view._image_size=None
-            view.clear();view.update();card.meta.setText('本帧图像不可用')
+            card.meta.setText('本帧图像不可用')
         self.roi_panel.sizes.clear();self.roi_panel.draw.setChecked(False);self.roi_panel._sync_fields()
     def _prepare_replay_frame(self,frame):
         if frame.metadata.get('hot3d'):
@@ -659,9 +671,9 @@ class MainWindow(QMainWindow):
                 frame=self._prepare_replay_frame(frame)
                 self._debug_frame=frame
                 p=self.reconstruction_panel
-                for side,view,img,ds in (("left",self.left_view,frame.left_image,r.left_detections),("right",self.right_view,frame.right_image,r.right_detections)):
-                    pairs=None if r.diagnostics.get('result_kind') in ('official_ground_truth','ground_truth_unavailable') or r.diagnostics.get('synthetic') else r.diagnostics.get('association_quality',{}).get('accepted_pairs',[])
-                    view.display(img,ds,r.hands,p.numbers.isChecked(),p.epilines.isChecked(),side,self.replay_rectifier.epipolar_axis if self.replay_rectifier else 1,accepted_pairs=pairs)
+                display_stereo(frame,r,self.left_view,self.right_view,
+                    numbers=p.numbers.isChecked(),epilines=p.epilines.isChecked(),
+                    epipolar_axis=self.replay_rectifier.epipolar_axis if self.replay_rectifier else 1)
                 image_error=None
             except Exception as e:
                 frame=None;self._clear_replay_images()
@@ -671,6 +683,7 @@ class MainWindow(QMainWindow):
         present_result(self,r,frame=frame)
         self.mano_controller.update(r,frame)
         self.skeleton.display(r)
+        self.vio_panel.show_recorded(self.saved_results,min(max(index,0),len(self.saved_results)-1))
         if image_error:self._error(image_error)
     def export_current(self):
         self._export([self.latest] if self.latest else [])
@@ -703,12 +716,12 @@ class MainWindow(QMainWindow):
                 self.calibration_panel.label.setText('SHOW3D · 本帧标定不可用\n无法完成双目校正和三维重建')
         p=self.reconstruction_panel
         epi_axis=self.worker.engine.rectifier.epipolar_axis if self.worker.engine.rectifier else 1
-        for side,view,image,ds in (("left",self.left_view,frame.left_image,shown.left_detections),("right",self.right_view,frame.right_image,shown.right_detections)):
-            pairs=None if r.diagnostics.get('result_kind') in ('official_ground_truth','ground_truth_unavailable') or r.diagnostics.get('synthetic') else r.diagnostics.get('association_quality',{}).get('accepted_pairs',[])
-            view.display(image,ds,shown.hands,p.numbers.isChecked(),p.epilines.isChecked(),side,epi_axis,accepted_pairs=pairs)
+        display_stereo(frame,shown,self.left_view,self.right_view,
+            numbers=p.numbers.isChecked(),epilines=p.epilines.isChecked(),epipolar_axis=epi_axis)
         self.skeleton.set_ground_truth(frame.metadata.get('ground_truth_left_camera',[]),self.show_ground_truth.isChecked(),redraw=False)
         self.mano_controller.update(r,frame)
         self.skeleton.display(shown)
+        self.vio_panel.set_hand_result(r)
         self.fit_hot3d_scene(r)
         if not self.worker.stop_event.is_set():
             self.banner.setText(("Paused · " if self.paused else "Running · ")+r.reconstruction_status+(" · "+r.diagnostics["reason"] if r.diagnostics.get("reason") else ""))
@@ -736,4 +749,5 @@ class MainWindow(QMainWindow):
             self.replay_thread.cancel()
             if not self.replay_thread.wait(15000):self.replay_thread.terminate();self.replay_thread.wait(3000)
         self.replay_thread=None
+        self.live_vio_worker.close()
         self.mano_controller.close();self.timer.stop();event.accept()

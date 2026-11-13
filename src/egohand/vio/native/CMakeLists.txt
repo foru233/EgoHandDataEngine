@@ -79,6 +79,10 @@ set(BOOST_LIBS
 set(OPENSSL_LIB "${CONDA_LIB}/libcrypto.lib")
 
 add_library(egohand_vio_bridge SHARED vio_bridge.cpp vio_bridge.h)
+option(EGOHAND_VIO_TEST_HOOKS "Build isolated numerical-fault injection tests; never deploy" OFF)
+if(EGOHAND_VIO_TEST_HOOKS)
+  target_compile_definitions(egohand_vio_bridge PRIVATE EGOHAND_VIO_TEST_HOOKS)
+endif()
 target_compile_definitions(egohand_vio_bridge PRIVATE
   EGOHAND_VIO_BRIDGE_BUILD
   COMPILEDWITHC11 WINDOWS _WINDOWS _WIN_
@@ -118,7 +122,29 @@ set_target_properties(egohand_vio_bridge PROPERTIES
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/bin"
   ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/lib"
 )
+option(EGOHAND_ATLAS_BRIDGE "Keep the Atlas DLL separate from the running live VIO DLL" OFF)
+option(EGOHAND_RECOVERY_BRIDGE "Build recovery bridge alongside the existing live DLL" OFF)
+if(EGOHAND_ATLAS_BRIDGE AND EGOHAND_RECOVERY_BRIDGE)
+  message(FATAL_ERROR "Choose only one bridge output name")
+endif()
+if(EGOHAND_ATLAS_BRIDGE)
+  set_target_properties(egohand_vio_bridge PROPERTIES OUTPUT_NAME egohand_vio_atlas_bridge)
+endif()
+if(EGOHAND_RECOVERY_BRIDGE)
+  set(EGOHAND_RECOVERY_OUTPUT_NAME "egohand_vio_recovery_bridge_v2" CACHE STRING "Recovery bridge output name")
+  set_target_properties(egohand_vio_bridge PROPERTIES OUTPUT_NAME "${EGOHAND_RECOVERY_OUTPUT_NAME}")
+endif()
 
 message(STATUS "ORB-SLAM3 import: ${ORB_BUILD}/ORB_SLAM3.lib")
 message(STATUS "OpenCV: ${OpenCV_VERSION}")
 message(STATUS "Conda runtime DLL directory: ${CONDA_BIN}")
+
+option(EGOHAND_VIO_CHEIRALITY_UNIT "Build real stereo-edge cheirality regression executable" OFF)
+if(EGOHAND_VIO_CHEIRALITY_UNIT)
+  add_executable(vio_cheirality_unit "${PROJECT_ROOT}/scripts/test_vio_cheirality.cpp")
+  foreach(prop COMPILE_DEFINITIONS COMPILE_OPTIONS INCLUDE_DIRECTORIES LINK_LIBRARIES)
+    get_target_property(value egohand_vio_bridge ${prop})
+    set_target_properties(vio_cheirality_unit PROPERTIES ${prop} "${value}")
+  endforeach()
+  target_compile_options(vio_cheirality_unit PRIVATE /UNDEBUG)
+endif()

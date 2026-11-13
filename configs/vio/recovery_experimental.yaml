@@ -1,0 +1,18 @@
+# 丢失恢复的实验参数；数值是经验包络，不是误差真值或统计置信区间。
+# 要求通过稳定跟踪且 ORB 的第二次惯性优化完成，才建立预测起点。
+stable_seconds: 1.5
+# 超时仅报告，不把等待时间视作地图无法恢复的证据。
+quarantine_timeout_s: 3.0
+# 可显式设为 legacy_new_map 恢复旧的超时自动新图策略。
+timeout_action: report_only
+# 图像帧与最近 IMU 样本之间允许的极短零阶保持（纳秒）。
+max_boundary_hold_ns: 5000000
+# 不补造中间 IMU 样本；超出最大缺口或时长就停止外推。
+max_gap_ns: 20000000
+max_duration_ns: 2000000000
+# 平移允许偏差 = position_floor_m + 0.5 * position_growth_mps2 * 时间²。
+position_floor_m: 0.30
+position_growth_mps2: 2.0
+# 旋转允许偏差 = angle_floor_deg + angle_growth_deg_s * 时间。
+angle_floor_deg: 25.0
+angle_growth_deg_s: 90.0

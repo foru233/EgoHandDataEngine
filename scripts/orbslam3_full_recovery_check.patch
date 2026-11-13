@@ -1,0 +1,450 @@
+--- a/include/System.h
++++ b/include/System.h
+@@ -25,6 +25,7 @@
+ #include<stdio.h>
+ #include<stdlib.h>
+ #include<string>
++#include<functional>
+ #include<thread>
+ #include<opencv2/core/core.hpp>
+ 
+@@ -177,6 +178,10 @@
+     // Information from most recent processed frame
+     // You can call this right after TrackMonocular (or stereo or RGBD)
+     int GetTrackingState();
++    bool GetLatestInertialBodyState(Eigen::Matrix4f& Twb, Eigen::Vector3f& velocity,
++                                    Eigen::Matrix<float,6,1>& bias, bool& ba2);
++    void SetRecoveryCandidateCheck(std::function<int(const Eigen::Matrix4f&, unsigned long long)> check);
++    std::function<int(const Eigen::Matrix4f&, unsigned long long)> GetRecoveryCandidateCheck();
+     std::vector<MapPoint*> GetTrackedMapPoints();
+     std::vector<cv::KeyPoint> GetTrackedKeyPointsUn();
+ 
+--- a/src/System.cc
++++ b/src/System.cc
+@@ -23,6 +23,7 @@
+ #include <stdexcept>
+ #include "Converter.h"
+ #include <thread>
++#include <unordered_map>
+ #include <pangolin/pangolin.h>
+ #include <iomanip>
+ #include <openssl/md5.h>
+@@ -38,6 +39,10 @@
+ namespace ORB_SLAM3
+ {
+ 
++namespace {
++std::mutex recovery_check_mutex;
++std::unordered_map<Tracking*, std::function<int(const Eigen::Matrix4f&, unsigned long long)>> recovery_checks;
++}
+ 
+ Verbose::eLevel Verbose::th = Verbose::VERBOSITY_NORMAL;
+ 
+@@ -528,6 +533,7 @@
+ 
+ void System::Shutdown()
+ {
++    SetRecoveryCandidateCheck({});
+     {
+         unique_lock<mutex> lock(mMutexReset);
+         mbShutDown = true;
+@@ -1338,6 +1344,40 @@
+     return mTrackingState;
+ }
+ 
++void System::SetRecoveryCandidateCheck(std::function<int(const Eigen::Matrix4f&, unsigned long long)> check)
++{
++    std::lock_guard<std::mutex> lock(recovery_check_mutex);
++    if (check) recovery_checks[mpTracker] = std::move(check);
++    else recovery_checks.erase(mpTracker);
++}
++
++std::function<int(const Eigen::Matrix4f&, unsigned long long)> System::GetRecoveryCandidateCheck()
++{
++    std::lock_guard<std::mutex> lock(recovery_check_mutex);
++    auto it = recovery_checks.find(mpTracker);
++    return it == recovery_checks.end() ? std::function<int(const Eigen::Matrix4f&, unsigned long long)>() : it->second;
++}
++
++bool System::GetLatestInertialBodyState(Eigen::Matrix4f& Twb, Eigen::Vector3f& velocity,
++                                        Eigen::Matrix<float,6,1>& bias, bool& ba2)
++{
++    if (!mpTracker || !mpAtlas) return false;
++    Map* map = mpAtlas->GetCurrentMap();
++    if (!map) return false;
++    unique_lock<mutex> map_lock(map->mMutexMapUpdate);
++    if (!map->isImuInitialized() || mpTracker->mState != Tracking::OK || !mpTracker->mCurrentFrame.HasPose() ||
++        !mpTracker->mCurrentFrame.HasVelocity()) return false;
++    Frame& frame = mpTracker->mCurrentFrame;
++    Twb = Eigen::Matrix4f::Identity();
++    Twb.block<3,3>(0,0) = frame.GetImuRotation();
++    Twb.block<3,1>(0,3) = frame.GetImuPosition();
++    velocity = frame.GetVelocity();
++    const IMU::Bias& b = frame.mImuBias;
++    bias << b.bax, b.bay, b.baz, b.bwx, b.bwy, b.bwz;
++    ba2 = map->GetIniertialBA2();
++    return Twb.allFinite() && velocity.allFinite() && bias.allFinite();
++}
++
+ vector<MapPoint*> System::GetTrackedMapPoints()
+ {
+     unique_lock<mutex> lock(mMutexState);
+--- a/src/System.cc
++++ b/src/System.cc
+@@ -528,7 +528,12 @@
+ unsigned long long System::GetMapEpoch()
+ {
+     unique_lock<mutex> lock(mMutexReset);
+-    return (static_cast<unsigned long long>(mpAtlas->GetCurrentMap()->GetId()) << 32) | (mMapResetRevision & 0xffffffffULL);
++    // 大范围闭环修正后，旧世界坐标中的 IMU 锚点不能与新坐标直接比较。
++    const auto mapId = static_cast<unsigned long long>(mpAtlas->GetCurrentMap()->GetId());
++    const auto change = static_cast<unsigned long long>(mpAtlas->GetLastBigChangeIdx());
++    if (mapId >= (1ULL << 24) || mMapResetRevision >= (1ULL << 20) || change >= (1ULL << 20))
++        throw std::overflow_error("VIO map epoch counter overflow");
++    return (mapId << 40) | (mMapResetRevision << 20) | change;
+ }
+ 
+ void System::Shutdown()
+--- a/src/Tracking.cc
++++ b/src/Tracking.cc
+@@ -3725,6 +3725,7 @@
+         }
+     }
+ 
++    const auto recoveryCandidateCheck = mpSystem->GetRecoveryCandidateCheck();
+     auto reloc_consistent = [&](const Sophus::SE3f& TcwCandidate, double& outTrans, double& outRotDeg) -> bool
+     {
+         outTrans = 0.0; outRotDeg = 0.0;
+@@ -3837,13 +3838,25 @@
+                 if(nGood>=50)
+                 {
+                     double dRelocTrans = 0.0, dRelocRot = 0.0;
+-                    if(!reloc_consistent(mCurrentFrame.GetPose(), dRelocTrans, dRelocRot))
++                    int recoveryDecision = -1;
++                    if (recoveryCandidateCheck && bInertialSensor && mCurrentFrame.mImuCalib.mbIsSet)
++                    {
++                        const Sophus::SE3f TwbCandidate = mCurrentFrame.GetPose().inverse() * mCurrentFrame.mImuCalib.mTcb;
++                        recoveryDecision = recoveryCandidateCheck(TwbCandidate.matrix(), mpSystem->GetMapEpoch());
++                    }
++                    const bool rejectCandidate = recoveryCandidateCheck
++                        ? (recoveryDecision == 0)
++                        : !reloc_consistent(mCurrentFrame.GetPose(), dRelocTrans, dRelocRot);
++                    if(rejectCandidate)
+                     {
+                         vbDiscarded[i] = true;
+                         nCandidates--;
+-                        cout << "Relocalization rejected by IMU check: translation "
+-                             << dRelocTrans << " m, rotation " << dRelocRot
+-                             << " deg over " << dRelocGap << " s" << endl;
++                        if(recoveryCandidateCheck)
++                            cout << "Relocalization rejected by full-interval recovery check" << endl;
++                        else
++                            cout << "Relocalization rejected by IMU check: translation "
++                                 << dRelocTrans << " m, rotation " << dRelocRot
++                                 << " deg over " << dRelocGap << " s" << endl;
+                         continue;
+                     }
+                     bMatch = true;
+--- a/include/LocalMapping.h
++++ b/include/LocalMapping.h
+@@ -179,7 +179,7 @@
+     bool mbAcceptKeyFrames;
+     std::mutex mMutexAccept;
+ 
+-    void InitializeIMU(float priorG = 1e2, float priorA = 1e6, bool bFirst = false);
++    bool InitializeIMU(float priorG = 1e2, float priorA = 1e6, bool bFirst = false);
+     void ScaleRefinement();
+ 
+     bool bInitializing;
+--- a/src/LocalMapping.cc
++++ b/src/LocalMapping.cc
+@@ -221,13 +221,12 @@
+                         else if(!mpCurrentKeyFrame->GetMap()->GetIniertialBA2()){
+                             if (mTinit>15.0f){
+                                 cout << "start VIBA 2" << endl;
+-                                mpCurrentKeyFrame->GetMap()->SetIniertialBA2();
+-                                if (mbMonocular)
+-                                    InitializeIMU(0.f, 0.f, true);
+-                                else
+-                                    InitializeIMU(0.f, 0.f, true);
+-
+-                                cout << "end VIBA 2" << endl;
++                                // BA2 在地图优化真正成功后才对外发布。
++                                const bool ba2Completed = InitializeIMU(0.f, 0.f, true);
++                                if (ba2Completed)
++                                    mpCurrentKeyFrame->GetMap()->SetIniertialBA2();
++
++                                cout << (ba2Completed ? "end VIBA 2" : "VIBA 2 incomplete") << endl;
+                             }
+                         }
+ 
+@@ -1180,10 +1179,10 @@
+     return mbFinished;
+ }
+ 
+-void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
++bool LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
+ {
+     if (mbResetRequested)
+-        return;
++        return false;
+ 
+     float minTime;
+     int nMinKF;
+@@ -1200,7 +1199,7 @@
+ 
+ 
+     if(mpAtlas->KeyFramesInMap()<nMinKF)
+-        return;
++        return false;
+ 
+     // Retrieve all keyframe in temporal order
+     list<KeyFrame*> lpKF;
+@@ -1214,11 +1213,11 @@
+     vector<KeyFrame*> vpKF(lpKF.begin(),lpKF.end());
+ 
+     if(vpKF.size()<nMinKF)
+-        return;
++        return false;
+ 
+     mFirstTs=vpKF.front()->mTimeStamp;
+     if(mpCurrentKeyFrame->mTimeStamp-mFirstTs<minTime)
+-        return;
++        return false;
+ 
+     if (mpTracker->mSensor == System::IMU_STEREO &&
+         !mpCurrentKeyFrame->GetMap()->isImuInitialized())
+@@ -1234,7 +1233,7 @@
+                     >= minTranslation * minTranslation;
+             });
+         if (!translated)
+-            return;
++            return false;
+     }
+ 
+     bInitializing = true;
+@@ -1299,7 +1298,7 @@
+     {
+         cout << "scale too small" << endl;
+         bInitializing=false;
+-        return;
++        return false;
+     }
+ 
+     // Before this line we are not changing the map
+@@ -1308,6 +1307,8 @@
+         if ((fabs(mScale - 1.f) > 0.00001) || !mbMonocular) {
+             Sophus::SE3f Twg(mRwg.cast<float>().transpose(), Eigen::Vector3f::Zero());
+             mpAtlas->GetCurrentMap()->ApplyScaledRotation(Twg, mScale, true);
++            // 重力/尺度修正会改变坐标，旧 IMU 外推锚点不能跨越该边界。
++            mpAtlas->GetCurrentMap()->InformNewBigChange();
+             mpTracker->UpdateFrameIMU(mScale, vpKF[0]->GetImuBias(), mpCurrentKeyFrame);
+         }
+ 
+@@ -1449,8 +1450,10 @@
+     bInitializing = false;
+ 
+     mpCurrentKeyFrame->GetMap()->IncreaseChangeIndex();
+-
+-    return;
++    // 全局惯性 BA 更新了整个地图，不得继续使用更新前的坐标锚点。
++    mpCurrentKeyFrame->GetMap()->InformNewBigChange();
++
++    return true;
+ }
+ 
+ void LocalMapping::ScaleRefinement()
+--- a/src/Tracking.cc
++++ b/src/Tracking.cc
+@@ -2150,6 +2150,21 @@
+             {
+                 bOK = TrackLocalMap();
+ 
++            }
++            // In mapping mode an inertial session normally keeps predicting until
++            // LOST, then creates another map without trying place recognition.
++            // While the original map and IMU anchor are still available, try a
++            // visually supported same-map relocalization before abandoning it.
++            if (!bOK && mState == RECENTLY_LOST && mSensor == System::IMU_STEREO &&
++                pCurrentMap->GetIniertialBA2() && mpSystem->GetRecoveryCandidateCheck())
++            {
++                const Frame beforeRelocalization(mCurrentFrame);
++                if (Relocalization())
++                {
++                    bOK = TrackLocalMap();
++                    if (bOK) cout << "Recovered in original map after local tracking loss" << endl;
++                }
++                if (!bOK) mCurrentFrame = beforeRelocalization;
+             }
+             if(!bOK)
+                 cout << "Fail to track local map!" << endl;
+--- a/src/Tracking.cc
++++ b/src/Tracking.cc
+@@ -2036,22 +2036,34 @@
+                 }
+                 else if (mState == LOST)
+                 {
+-
+-                    Verbose::PrintMess("A new map is started...", Verbose::VERBOSITY_NORMAL);
+-
+-                    if (pCurrentMap->KeyFramesInMap()<10)
++                    // Keep the original map available while attempting visual
++                    // relocalization. IMU checks may be unavailable for long gaps;
++                    // the bridge reports that separately rather than claiming accuracy.
++                    constexpr double sameMapRecoveryWindowSeconds = 30.0;
++                    const double lostDuration = mCurrentFrame.mTimeStamp - mTimeStampLost;
++                    const bool tryOriginalMap = mSensor == System::IMU_STEREO &&
++                        pCurrentMap->GetIniertialBA2() && mpSystem->GetRecoveryCandidateCheck() &&
++                        lostDuration >= 0.0 && lostDuration <= sameMapRecoveryWindowSeconds;
++                    if (tryOriginalMap && Relocalization())
+                     {
+-                        mpSystem->ResetActiveMap();
+-                        Verbose::PrintMess("Reseting current map...", Verbose::VERBOSITY_NORMAL);
+-                    }else
+-                        CreateMapInAtlas();
+-
+-                    if(mpLastKeyFrame)
+-                        mpLastKeyFrame = static_cast<KeyFrame*>(NULL);
+-
+-                    Verbose::PrintMess("done", Verbose::VERBOSITY_NORMAL);
+-
+-                    return;
++                        bOK = true;
++                        mState = RECENTLY_LOST; // TrackLocalMap must still validate this frame.
++                        cout << "Recovered original map after tracking was lost" << endl;
++                    }
++                    else
++                    {
++                        if (tryOriginalMap) return;
++                        Verbose::PrintMess("A new map is started...", Verbose::VERBOSITY_NORMAL);
++                        if (pCurrentMap->KeyFramesInMap()<10)
++                        {
++                            mpSystem->ResetActiveMap();
++                            Verbose::PrintMess("Reseting current map...", Verbose::VERBOSITY_NORMAL);
++                        } else CreateMapInAtlas();
++                        if(mpLastKeyFrame)
++                            mpLastKeyFrame = static_cast<KeyFrame*>(NULL);
++                        Verbose::PrintMess("done", Verbose::VERBOSITY_NORMAL);
++                        return;
++                    }
+                 }
+             }
+ 
+--- a/src/Tracking.cc
++++ b/src/Tracking.cc
+@@ -2052,7 +2052,13 @@
+                     }
+                     else
+                     {
+-                        if (tryOriginalMap) return;
++                        if (tryOriginalMap)
++                        {
++                            // Advance the frame clock while waiting, otherwise the
++                            // timestamp-jump guard would create a map after one second.
++                            mLastFrame = Frame(mCurrentFrame);
++                            return;
++                        }
+                         Verbose::PrintMess("A new map is started...", Verbose::VERBOSITY_NORMAL);
+                         if (pCurrentMap->KeyFramesInMap()<10)
+                         {
+@@ -2314,6 +2320,15 @@
+         // Reset if the camera get lost soon after initialization
+         if(mState==LOST && !mbOnlyTracking)
+         {
++            // The LOST transition occurs here before the next-frame recovery
++            // branch. Preserve the map and advance time so it can attempt recovery.
++            if (mSensor == System::IMU_STEREO && pCurrentMap->GetIniertialBA2() &&
++                mpSystem->GetRecoveryCandidateCheck() &&
++                mCurrentFrame.mTimeStamp - mTimeStampLost <= 30.0)
++            {
++                mLastFrame = Frame(mCurrentFrame);
++                return;
++            }
+             if(pCurrentMap->KeyFramesInMap()<=10)
+             {
+                 mpSystem->ResetActiveMap();
+--- a/src/Tracking.cc
++++ b/src/Tracking.cc
+@@ -41,7 +41,8 @@
+ 
+ namespace ORB_SLAM3
+ {
+-
++// Maximum time allowed for same-map recovery before starting a new map.
++constexpr double kSameMapRecoveryWindowSeconds = 8.0;
+ 
+ Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer, MapDrawer *pMapDrawer, Atlas *pAtlas, KeyFrameDatabase* pKFDB, const string &strSettingPath, const int sensor, Settings* settings, const string &_nameSeq):
+     mState(NO_IMAGES_YET), mSensor(sensor), mTrackedFr(0), mbStep(false),
+@@ -2039,11 +2040,10 @@
+                     // Keep the original map available while attempting visual
+                     // relocalization. IMU checks may be unavailable for long gaps;
+                     // the bridge reports that separately rather than claiming accuracy.
+-                    constexpr double sameMapRecoveryWindowSeconds = 30.0;
+                     const double lostDuration = mCurrentFrame.mTimeStamp - mTimeStampLost;
+                     const bool tryOriginalMap = mSensor == System::IMU_STEREO &&
+                         pCurrentMap->GetIniertialBA2() && mpSystem->GetRecoveryCandidateCheck() &&
+-                        lostDuration >= 0.0 && lostDuration <= sameMapRecoveryWindowSeconds;
++                        lostDuration >= 0.0 && lostDuration <= kSameMapRecoveryWindowSeconds;
+                     if (tryOriginalMap && Relocalization())
+                     {
+                         bOK = true;
+@@ -2324,7 +2324,7 @@
+             // branch. Preserve the map and advance time so it can attempt recovery.
+             if (mSensor == System::IMU_STEREO && pCurrentMap->GetIniertialBA2() &&
+                 mpSystem->GetRecoveryCandidateCheck() &&
+-                mCurrentFrame.mTimeStamp - mTimeStampLost <= 30.0)
++                mCurrentFrame.mTimeStamp - mTimeStampLost <= kSameMapRecoveryWindowSeconds)
+             {
+                 mLastFrame = Frame(mCurrentFrame);
+                 return;
+--- a/src/Tracking.cc
++++ b/src/Tracking.cc
+@@ -3661,6 +3661,7 @@
+ bool Tracking::Relocalization()
+ {
+     Verbose::PrintMess("Starting relocalization", Verbose::VERBOSITY_NORMAL);
++    const bool traceRecovery = std::getenv("EGOHAND_RELOC_TRACE") != nullptr;
+     // Compute Bag of Words Vector
+     mCurrentFrame.ComputeBoW();
+ 
+@@ -3669,6 +3670,7 @@
+     vector<KeyFrame*> vpCandidateKFs = mpKeyFrameDB->DetectRelocalizationCandidates(&mCurrentFrame, mpAtlas->GetCurrentMap());
+ 
+     if(vpCandidateKFs.empty()) {
++        if (traceRecovery) cout << "Recovery trace: no keyframe candidates; features=" << mCurrentFrame.N << endl;
+         Verbose::PrintMess("There are not candidates", Verbose::VERBOSITY_NORMAL);
+         return false;
+     }
+@@ -3688,6 +3690,7 @@
+     vbDiscarded.resize(nKFs);
+ 
+     int nCandidates=0;
++    int bestBowMatches=0, bestOptimizedInliers=0;
+ 
+     for(int i=0; i<nKFs; i++)
+     {
+@@ -3697,6 +3700,7 @@
+         else
+         {
+             int nmatches = matcher.SearchByBoW(pKF,mCurrentFrame,vvpMapPointMatches[i]);
++            bestBowMatches = std::max(bestBowMatches, nmatches);
+             if(nmatches<15)
+             {
+                 vbDiscarded[i] = true;
+@@ -3835,6 +3839,7 @@
+                 }
+ 
+                 int nGood = Optimizer::PoseOptimization(&mCurrentFrame);
++                bestOptimizedInliers = std::max(bestOptimizedInliers, nGood);
+ 
+                 if(nGood<10)
+                     continue;
+@@ -3908,6 +3913,8 @@
+         }
+     }
+ 
++    if (traceRecovery) cout << "Recovery trace: keyframes=" << nKFs << " bow_matches=" << bestBowMatches
++                            << " pnp_inliers=" << bestOptimizedInliers << " accepted=" << bMatch << endl;
+     if(!bMatch)
+     {
+         return false;

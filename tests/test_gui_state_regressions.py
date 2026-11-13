@@ -64,7 +64,7 @@ def test_failed_worker_resets_controls(window, qtbot, monkeypatch):
     qtbot.waitUntil(lambda: not w.worker.isRunning(), timeout=5000)
     qtbot.wait(50)
     assert not w.pause_button.isEnabled()
-    assert not w.record_button.isEnabled()
+    assert not w.recording_panel.start_button.isEnabled()
     assert '测试相机连接失败' in w.banner.text()
 
 
@@ -127,8 +127,8 @@ def test_failed_record_start_restores_toolbar(window, qtbot, monkeypatch, tmp_pa
     w.start_recording()
     qtbot.waitUntil(lambda: '测试写入失败' in w.statusBar().currentMessage(), timeout=3000)
     assert not w.recording
-    assert w.record_start_action.isEnabled()
-    assert w.record_button.text() == '录制'
+    assert w.recording_panel.start_button.isEnabled()
+    assert not w.recording_panel.recording
     assert w.worker.isRunning()
 
 

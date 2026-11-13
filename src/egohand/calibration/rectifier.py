@@ -53,10 +53,14 @@ class StereoRectifier:
 
     def rectify(self, frame):
         c = self.c
-        for img in (frame.left_image,frame.right_image):
+        for side, img in enumerate((frame.left_image,frame.right_image)):
             if img is None or img.ndim != 3 or img.shape[2] != 3 or img.dtype != np.uint8:
                 raise CalibrationError("图像必须为 uint8 BGR 三通道")
-            validate_calibration(c,(img.shape[1],img.shape[0]))
+            if side == 0:
+                # 标定完整性每帧验证一次；左右图共享同一标定，右图只需核对尺寸。
+                validate_calibration(c,(img.shape[1],img.shape[0]))
+            elif (img.shape[1],img.shape[0]) != (c.image_width,c.image_height):
+                raise CalibrationError("标定与实际图像尺寸不一致")
         if frame.calibration_id != c.calibration_id:
             raise CalibrationError("帧与标定 ID 不一致")
         if frame.image_geometry == "rectified":

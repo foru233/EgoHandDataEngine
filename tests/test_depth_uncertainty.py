@@ -73,7 +73,8 @@ def test_systematic_bias_can_hide_behind_zero_reprojection(engine,source):
     f=engine.rectifier.rectify(source.read())
     a,b=f.left_detections[0],f.right_detections[0]
     shifted=b.pixel_landmarks.copy();shifted[:,0]+=5.
-    joints=JointTriangulator(engine.rectifier,engine.config).triangulate(a,replace(b,pixel_landmarks=shifted))
+    # 此用例验证启用重投影质量分后，系统偏差仍可能被低残差掩盖。
+    joints=JointTriangulator(engine.rectifier,{**engine.config,'use_reprojection_error':True}).triangulate(a,replace(b,pixel_landmarks=shifted))
     errors=[np.linalg.norm(j.xyz_m-f.metadata['ground_truth_xyz_m'][0,j.joint_id]) for j in joints if j.valid]
     assert np.mean(errors)>.05
     assert max(j.reprojection_error_px for j in joints if j.valid)<1e-8

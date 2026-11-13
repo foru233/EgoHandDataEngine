@@ -36,6 +36,6 @@ class AdaptiveViews(QSplitter):
             self.cameras.setSizes([width//2,width//2])
         else:
             self.setOrientation(Qt.Horizontal);self.cameras.setOrientation(Qt.Vertical)
-            camera_width=round(max(300,min(width*.63,(height-gap-2*header)/2*self.image_ratio*1.15)))
+            camera_width=round(max(264,min(width*.63,(height-gap-2*header)/2*self.image_ratio)))
             self.setSizes([camera_width,max(270,width-camera_width-gap)])
             self.cameras.setSizes([height//2,height//2])

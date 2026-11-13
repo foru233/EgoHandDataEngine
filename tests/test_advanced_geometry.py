@@ -10,7 +10,7 @@ def test_reprojection_rejection(engine,source):
     r=engine.rectifier;f=r.rectify(source.read())
     a,b=f.left_detections[0],f.right_detections[0]
     uv=b.pixel_landmarks.copy();uv[:,1]+=10
-    cfg={**engine.config,"max_epipolar_px":20.,"max_reprojection_px":1.}
+    cfg={**engine.config,"max_epipolar_px":20.,"max_reprojection_px":1.,'use_reprojection_error':True}
     js=JointTriangulator(r,cfg).triangulate(a,replace(b,pixel_landmarks=uv))
     assert all(j.status=="REPROJECTION_REJECTED" for j in js)
 
@@ -18,7 +18,7 @@ def test_epipolar_rejection(engine,source):
     r=engine.rectifier;f=r.rectify(source.read())
     a,b=f.left_detections[0],f.right_detections[0]
     uv=b.pixel_landmarks.copy();uv[:,1]+=15
-    js=JointTriangulator(r,engine.config).triangulate(a,replace(b,pixel_landmarks=uv))
+    js=JointTriangulator(r,{**engine.config,'use_epipolar_error':True}).triangulate(a,replace(b,pixel_landmarks=uv))
     assert all(j.status=="EPIPOLAR_REJECTED" for j in js)
 
 def test_unbounded_depth_keeps_positive_depth_and_optional_limits(engine,source):
@@ -42,7 +42,7 @@ def test_epipolar_switch_keeps_reprojection_gate(engine,source):
     assert all(j.status=='EPIPOLAR_REJECTED' for j in on)
     assert all(j.valid and j.epipolar_error_px>3 for j in off)
     uv=b.pixel_landmarks.copy();uv[:,1]+=15
-    off=JointTriangulator(r,{**engine.config,'use_epipolar_error':False}).triangulate(a,replace(b,pixel_landmarks=uv))
+    off=JointTriangulator(r,{**engine.config,'use_epipolar_error':False,'use_reprojection_error':True}).triangulate(a,replace(b,pixel_landmarks=uv))
     assert all(j.status=='REPROJECTION_REJECTED' for j in off)
 
 def test_reprojection_switch_independent(engine,source):

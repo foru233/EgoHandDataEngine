@@ -22,6 +22,7 @@ def build_parser():
     )
     parser.add_argument('--recording', required=True, help='录制目录（含 raw/sdk_records.bin）')
     parser.add_argument('--output', help='输出目录；默认 <recording>/replay_vio/replay_<unixns>')
+    parser.add_argument('--config-snapshot', help='显式完整配置快照目录；供缺少快照的旧录制使用')
     parser.add_argument('--lag-ms', type=float, help='覆盖 camera_to_imu_lag_ms（默认取录制/仓库配置）')
     parser.add_argument('--alignment', choices=('timestamp', 'lattice'),
                         help='覆盖 IMU 对齐方式（默认取录制/仓库配置）')
@@ -29,6 +30,8 @@ def build_parser():
     parser.add_argument('--lattice-phase-ms', type=float, help='包格点相位，正值把样本时间后移')
     parser.add_argument('--stride', type=int, default=1, help='每 N 帧处理 1 帧（默认 1）')
     parser.add_argument('--max-frames', type=int, default=None, help='最多处理的帧数（默认全部）')
+    parser.add_argument('--start-stamp-ns', type=int, help='起始相机绝对时间（含，纳秒）；首帧空 IMU')
+    parser.add_argument('--end-stamp-ns', type=int, help='结束相机绝对时间（含，纳秒）')
     parser.add_argument('--quiet', action='store_true', help='不打印逐帧状态，只打印最终摘要')
     return parser
 
@@ -39,6 +42,11 @@ def main(argv=None):
         raise SystemExit('--stride 必须 >= 1')
     if args.max_frames is not None and args.max_frames < 1:
         raise SystemExit('--max-frames 必须 >= 1')
+    if any(value is not None and not 0 < value < 2**63
+           for value in (args.start_stamp_ns, args.end_stamp_ns)):
+        raise SystemExit('起止时间必须为正整数纳秒')
+    if args.start_stamp_ns is not None and args.end_stamp_ns is not None and args.start_stamp_ns > args.end_stamp_ns:
+        raise SystemExit('--start-stamp-ns 必须 <= --end-stamp-ns')
     recording = Path(args.recording).resolve()
     if not recording.is_dir():
         raise SystemExit(f'录制目录不存在：{recording}')
@@ -63,13 +71,20 @@ def main(argv=None):
             return  # 逐帧位姿已写入 poses.jsonl，终端只显示控制/进度消息
         print(f'[{kind}] {message.get("message", "")}', flush=True)
 
+    config_options = {}
+    if args.config_snapshot:
+        from egohand.vio.config_snapshot import resolve_recording_config
+        config_options['config_snapshot'] = resolve_recording_config(Path(args.config_snapshot))
     vio = ReplayVio(
         recording,
         output_dir=args.output,
         timing=timing or None,
         stride=args.stride,
         max_frames=args.max_frames,
+        start_stamp_ns=args.start_stamp_ns,
+        end_stamp_ns=args.end_stamp_ns,
         on_status=on_status,
+        **config_options,
     )
     try:
         report = vio.run()
@@ -85,6 +100,7 @@ def main(argv=None):
         'poses_jsonl': (report.get('output') or {}).get('poses'),
         'run_log': (report.get('output') or {}).get('run_log'),
         'frames': frames,
+        'image_range': report.get('image_range'),
         'map_epochs': report.get('map_epochs'),
         'reset_events': report.get('reset_events'),
         'imu': report.get('imu'),

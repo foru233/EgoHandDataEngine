@@ -43,7 +43,7 @@ def test_sync_grade_contract():
 
 
 def test_all_geometrically_rejected_uncertainty_is_none():
-    r=measure_case(5,1.,'vertical')
+    r=measure_case(5,1.,'vertical',config_overrides={'use_epipolar_error':True})
     assert r['valid_rate_without_sync_gate']==0
     assert r['depth_std_m'] is None
     assert r['ungated_triangulation_error_mm']>0

@@ -1,0 +1,40 @@
+--- a/include/System.h
++++ b/include/System.h
+@@ -177,6 +177,8 @@
+     // Information from most recent processed frame
+     // You can call this right after TrackMonocular (or stereo or RGBD)
+     int GetTrackingState();
++    bool GetLatestInertialBodyState(Eigen::Matrix4f& Twb, Eigen::Vector3f& velocity,
++                                    Eigen::Matrix<float,6,1>& bias, bool& ba2);
+     std::vector<MapPoint*> GetTrackedMapPoints();
+     std::vector<cv::KeyPoint> GetTrackedKeyPointsUn();
+ 
+--- a/src/System.cc
++++ b/src/System.cc
+@@ -1337,6 +1337,26 @@
+     return mTrackingState;
+ }
+ 
++bool System::GetLatestInertialBodyState(Eigen::Matrix4f& Twb, Eigen::Vector3f& velocity,
++                                        Eigen::Matrix<float,6,1>& bias, bool& ba2)
++{
++    if (!mpTracker || !mpAtlas) return false;
++    Map* map = mpAtlas->GetCurrentMap();
++    if (!map) return false;
++    unique_lock<mutex> map_lock(map->mMutexMapUpdate);
++    if (!map->isImuInitialized() || mpTracker->mState != Tracking::OK || !mpTracker->mCurrentFrame.HasPose() ||
++        !mpTracker->mCurrentFrame.HasVelocity()) return false;
++    Frame& frame = mpTracker->mCurrentFrame;
++    Twb = Eigen::Matrix4f::Identity();
++    Twb.block<3,3>(0,0) = frame.GetImuRotation();
++    Twb.block<3,1>(0,3) = frame.GetImuPosition();
++    velocity = frame.GetVelocity();
++    const IMU::Bias& b = frame.mImuBias;
++    bias << b.bax, b.bay, b.baz, b.bwx, b.bwy, b.bwz;
++    ba2 = map->GetIniertialBA2();
++    return Twb.allFinite() && velocity.allFinite() && bias.allFinite();
++}
++
+ vector<MapPoint*> System::GetTrackedMapPoints()
+ {
+     unique_lock<mutex> lock(mMutexState);

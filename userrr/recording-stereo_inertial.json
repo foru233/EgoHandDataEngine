@@ -1,0 +1,9 @@
+{
+  "mode": "stereo_inertial",
+  "processed": 8,
+  "has_image": true,
+  "has_pose_message": true,
+  "error": null,
+  "elapsed": 22.812999999994645,
+  "stopped": true
+}

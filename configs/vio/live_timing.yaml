@@ -1,8 +1,8 @@
-# VS030 实时 VIO 的相机—IMU 对齐设置（2026-11-10 修正）。
-# 实测结论：IMU 物理采样与相机严格 16:1（480 Hz / 30 Hz）；驱动时间戳由 IMU 内部
-# RC 计数器按标称 480 Hz 合成，相对真实时间有 ~0.2-0.3% 误差，因此“用时间戳对齐”
-# 会表现为随时间增长的假漂移。正确做法是忽略时间戳、按帧格点计数重采样（与厂商
-# MCAP 的 exposure_start + i*T/N 一致）。
+# VS030 实时 VIO 的相机—IMU 对齐设置（2026-11-12 逐会话核验）。
+# 录制中包头格点约 480 Hz；payload 两路原始时间相对相机有漂移，物理语义仍待厂商确认。
+# 已发现不同录制的有效包相位约 +34 / +99 ms，不能将其中一个常数推广至所有新会话。
+# session_auto 使用独立双目旋转与陀螺积分的训练/留出一致性确认本次有效相位。
+# 不通过时保持准备状态；这不是物理曝光时刻或设备协议的最终标定。
 # 用 480.0 Hz 格点重放 8 分钟数据：各 10 s 窗最佳时延恒为 -40 ms（斜率 0.02 ms/s）；
 # 479.5/481.2 Hz 分别产生 +1.05 / -2.59 ms/s 的假漂移。
 #
@@ -14,11 +14,12 @@
 #   用 scripts/analyze_vs030_lag_capture.py + 速率扫描重新标定。
 imu_alignment: lattice
 lattice_reference: packet      # count 可复现旧的首帧计数方案
-lattice_phase_ms: 97.0         # 样本时间 = 包头 + 相位 + 包内格点；三段旋转录制实测
+lattice_phase_mode: session_auto # 每次新会话先用独立双目旋转/陀螺核验，未确认不启动惯性跟踪
+lattice_phase_ms: 97.0         # 仅作为准备缓冲的初始值；不作为自动会话核验成功的替代
 camera_to_imu_lag_ms: -85.0
 imu_rate_hz: 480.0
 camera_to_imu_drift_ppm: 0.0
 # 实时性能：ORB 输入缩放到 0.5（800x600）并配套半分辨率配置；
 # 实测单帧 97 ms -> 37 ms，跟踪率不变。
 image_scale: 0.5
-orb_config: configs/vio/vs030_rectified_half.yaml
+orb_config: configs/vio/vs030_rectified_half_calibration2.yaml

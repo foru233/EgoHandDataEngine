@@ -7,6 +7,7 @@ import re
 import subprocess
 import struct
 import threading
+from tempfile import gettempdir
 import time
 
 from .vendor_placeholder import VendorStereoSource, ROOT, CALIBRATION_PATH, KALIBR_LEFT_CAMERA
@@ -41,6 +42,7 @@ class XdSdkStereoSource(VendorStereoSource):
     def __init__(self):
         super().__init__()
         self.process = None
+        self._device_lease = None
         self.imu_vio_queue = None
         self.imu_vio_error = None
         self.sdk_diagnostics = ""
@@ -159,6 +161,25 @@ class XdSdkStereoSource(VendorStereoSource):
                     break
 
     def start(self):
+        import msvcrt
+
+        if self._device_lease is not None:
+            raise RuntimeError("VS030 已在本会话中启动")
+        lease = (Path(gettempdir()) / f"egohand-vs030-{self.camera_ip}.lock").open("a+b")
+        try:
+            lease.seek(0)
+            msvcrt.locking(lease.fileno(), msvcrt.LK_NBLCK, 1)
+        except OSError as exc:
+            lease.close()
+            raise RuntimeError("VS030 设备已被另一个扫描或采集程序占用") from exc
+        self._device_lease = lease
+        try:
+            self._start_stream()
+        except BaseException:
+            self.stop()
+            raise
+
+    def _start_stream(self):
         env = os.environ.copy()
         env["PATH"] = str(SDK_DIR) + os.pathsep + env.get("PATH", "")
         self.process = subprocess.Popen(
@@ -489,6 +510,14 @@ class XdSdkStereoSource(VendorStereoSource):
         return result
 
     def stop(self):
+        try:
+            self._stop_stream()
+        finally:
+            if self._device_lease is not None:
+                self._device_lease.close()
+                self._device_lease = None
+
+    def _stop_stream(self):
         self.stop_event.set()
         self.read_interrupt.set()
         self.running = False

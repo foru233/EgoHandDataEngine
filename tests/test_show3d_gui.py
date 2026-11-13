@@ -1,9 +1,13 @@
 """SHOW3D integration smoke and regression; requires local verified SHOW3D files."""
 import os
+import sys
 from pathlib import Path
 import numpy as np
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+# Windows 使用原生 Qt 平台，以便其他测试正常创建 OpenGL 上下文。
+# 无显示服务器的 Linux 环境仍可显式使用 offscreen。
+if sys.platform.startswith('linux') and not (os.environ.get('DISPLAY') or os.environ.get('WAYLAND_DISPLAY')):
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from egohand.core.pipeline import EgoHandEngine, ROOT
 from egohand.sources.show3d import SHOW3DSource, SHOW3DFrameProcessor, _verified_scenes, world_to_camera
@@ -112,9 +116,8 @@ def test_show3d_gui_source_selector():
     try:
         idx = window.source_panel.kind.findText("SHOW3D · v3 双目")
         assert idx >= 0
-        assert window.source_panel.kind.currentIndex() == idx
-        assert '等待启动' in window.calibration_panel.label.text()
         window.source_panel.kind.setCurrentIndex(idx)
+        assert '等待启动' in window.calibration_panel.label.text()
         assert window.source_panel.hot3d_mode.isVisible() or not window.isVisible()
         source = window.make_source()
         assert isinstance(source, SHOW3DSource)
@@ -132,12 +135,12 @@ def test_show3d_gui_source_selector():
         window.close()
 
 
-def test_show3d_default_reports_actual_frame_calibration(qtbot):
+def test_show3d_reports_actual_frame_calibration(qtbot):
     window = MainWindow()
     qtbot.addWidget(window)
     window.show()
     try:
-        assert window.source_panel.kind.currentIndex() == 5
+        window.source_panel.kind.setCurrentIndex(5)
         window.start_pipeline()
         qtbot.waitUntil(lambda: bool(window.latest is not None and
             window.latest.source_type == 'show3d' and window.latest.calibration_id and

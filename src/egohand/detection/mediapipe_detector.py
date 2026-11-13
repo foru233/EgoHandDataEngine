@@ -10,9 +10,11 @@ from dataclasses import replace
 from ..core.types import HandDetection
 from .roi import validate_roi,roi_pixel_box
 
-# 全图零检出时才重试固定重叠区域；不使用标注框，不改变模型分数阈值。
+# 默认仅在全图零检出时重试；离线可显式补检缺失的另一只手。
 DEFAULT_RESCUE={"enabled":True,"crop_fraction":.65,"duplicate_distance_fraction":.25,
-                "min_inside_joints":16,"min_image_side_px":128,"max_crops_per_frame":4}
+                "min_inside_joints":16,"min_image_side_px":128,"max_crops_per_frame":4,
+                "retry_partial":False,"partial_retry_interval_frames":1,
+                "refine_full_frame":False,"refinement_crop_scale":1.8}
 
 
 def restore_crop_detection(detection,box,image_shape):
@@ -69,7 +71,16 @@ class MediaPipeHandDetector:
         if not 0<self.rescue_config['duplicate_distance_fraction']<=1:raise ValueError('rescue.duplicate_distance_fraction 必须在 (0,1] 内')
         if not 1<=self.rescue_config['min_inside_joints']<=21 or self.rescue_config['min_image_side_px']<1:raise ValueError('rescue 关节计数/最小尺寸配置无效')
         if not 1<=self.rescue_config['max_crops_per_frame']<=4:raise ValueError('max_crops_per_frame 必须在 1 到 4 之间')
+        interval=self.rescue_config['partial_retry_interval_frames']
+        if isinstance(interval,bool) or not isinstance(interval,int) or interval<1:
+            raise ValueError('partial_retry_interval_frames 必须为正整数')
+        if not isinstance(self.rescue_config['retry_partial'],bool):raise ValueError('retry_partial 必须为布尔值')
+        if not isinstance(self.rescue_config['refine_full_frame'],bool):raise ValueError('refine_full_frame 必须为布尔值')
+        scale=self.rescue_config['refinement_crop_scale']
+        if isinstance(scale,bool) or not np.isfinite(scale) or not 1<scale<=3:
+            raise ValueError('refinement_crop_scale 必须在 (1,3] 内')
         self._rescue_cursor=0
+        self._rescue_frame_number=0
         self._task_options=dict(base_options=mp.tasks.BaseOptions(model_asset_path=str(path.resolve()),delegate=mp.tasks.BaseOptions.Delegate.CPU),
             num_hands=num_hands,min_hand_detection_confidence=min_hand_detection_confidence,
             min_hand_presence_confidence=min_hand_presence_confidence,min_tracking_confidence=min_tracking_confidence)
@@ -108,11 +119,23 @@ class MediaPipeHandDetector:
     def _detect_with_rescue(self,image,timestamp_ns=0):
         hands=self._detect_single(image,timestamp_ns)
         cfg=self.rescue_config
+        full_count=len(hands)
+        self._rescue_frame_number=getattr(self,'_rescue_frame_number',0)+1
         detail={'method':'full_frame','full_frame_hands':len(hands),'crop_attempts':0,
                 'rescue_hands':0,'rescue_config':dict(cfg),'used_ground_truth':False}
         self.last_detection_diagnostics=detail
-        # 仅补救完全漏检，已有全图结果原样返回，避免重试扰动正常检测。
-        if hands or not cfg['enabled'] or min(image.shape[:2])<cfg['min_image_side_px']:return hands
+        if cfg.get('refine_full_frame',False) and hands:
+            hands=self._refine_full_frame(image,hands,timestamp_ns,detail)
+        # 完整保留本帧全图观测，只追加当前真实裁剪的新观测。补检不生成缺失点，
+        # VIDEO 主图的时间轴不重交；跨裁剪去重不依赖可能翻转的手侧标签。
+        if (not cfg['enabled'] or len(hands)>=self.num_hands
+                or min(image.shape[:2])<cfg['min_image_side_px']):return hands
+        if hands:
+            if not cfg.get('retry_partial',False):return hands
+            interval=cfg.get('partial_retry_interval_frames',1)
+            if (self._rescue_frame_number-1)%interval:
+                detail['partial_retry_deferred']=True
+                return hands
         height,width=image.shape[:2];cw=int(round(width*cfg['crop_fraction']));ch=int(round(height*cfg['crop_fraction']))
         tiles=[(x,y) for y in (0,height-ch) for x in (0,width-cw)]
         count=cfg['max_crops_per_frame'];start=getattr(self,'_rescue_cursor',0)
@@ -128,8 +151,48 @@ class MediaPipeHandDetector:
                 if not any(same_hand_pixels(candidate,old,cfg['duplicate_distance_fraction']) for old in hands):hands.append(candidate)
                 if len(hands)>=self.num_hands:break
             if len(hands)>=self.num_hands:break
-        detail.update(method='full_frame_then_overlapping_tiles',rescue_hands=len(hands))
+        detail.update(method='full_frame_then_overlapping_tiles',rescue_hands=len(hands)-full_count)
         return hands
+
+    def _refine_full_frame(self,image,hands,timestamp_ns,detail):
+        """Current-frame crop inference; retain originals and reject ambiguous replacements."""
+        cfg=self.rescue_config;height,width=image.shape[:2]
+        detail.update(method='full_frame_then_hand_roi',full_frame_observations=list(hands),
+            refinement_attempts=0,refined_hands=0,refinement=[])
+        output=[]
+        for index,original in enumerate(hands):
+            points=original.pixel_landmarks
+            inside=original.valid&np.isfinite(points).all(axis=1)&(points>=0).all(axis=1)&(points<[width,height]).all(axis=1)
+            note={'index':index,'status':'insufficient_inside_original_points'}
+            detail['refinement'].append(note)
+            if inside.sum()<cfg['min_inside_joints']:
+                output.append(original);continue
+            low=points[inside].min(axis=0);high=points[inside].max(axis=0)
+            side=max(cfg['min_image_side_px'],int(np.ceil(max(high-low)*cfg['refinement_crop_scale'])))
+            side=min(side,height,width)
+            x=int(np.clip(np.floor((low[0]+high[0]-side)/2),0,width-side))
+            y=int(np.clip(np.floor((low[1]+high[1]-side)/2),0,height-side))
+            note.update(box=[x,y,side,side],status='no_unique_same_hand_crop_observation')
+            detail['refinement_attempts']+=1
+            matches=[]
+            for detected in self._detect_single(np.ascontiguousarray(image[y:y+side,x:x+side]),timestamp_ns,image_mode=True):
+                valid=detected.valid&np.isfinite(detected.pixel_landmarks).all(axis=1)&(detected.pixel_landmarks>=0).all(axis=1)&(detected.pixel_landmarks<[side,side]).all(axis=1)
+                if valid.sum()<cfg['min_inside_joints']:continue
+                restored=restore_crop_detection(detected,(x,y,side,side),image.shape)
+                restored.valid&=valid
+                # Contextual full-image identity stays fixed. Never choose a
+                # replacement if it could refer to another visible full-image hand.
+                owners=[i for i,hand in enumerate(hands) if same_hand_pixels(restored,hand,cfg['duplicate_distance_fraction'])]
+                if owners==[index]:matches.append(restored)
+            if len(matches)==1:
+                refined=matches[0]
+                note.update(status='refined',crop_handedness=refined.handedness,
+                    crop_handedness_score=refined.handedness_score,output_label_source='original_full_frame_context')
+                output.append(replace(refined,handedness=original.handedness,
+                    handedness_score=original.handedness_score,origin='mediapipe_roi_refinement'))
+                detail['refined_hands']+=1
+            else:output.append(original)
+        return output
 
     def _detect_single(self,image,timestamp_ns=0,image_mode=False):
         # VIDEO 主图只提交一次时间戳；裁剪补救使用独立 IMAGE 实例，不破坏视频时间轴。

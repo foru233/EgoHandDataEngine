@@ -53,6 +53,85 @@ def test_zero_detection_uses_image_mode_for_tiles_and_no_invented_hands():
     assert not d.detect(np.zeros((480,640,3),np.uint8),789)
     assert calls==[(789,False)]
 
+
+def test_partial_rescue_keeps_full_observation_and_deduplicates_label_flip():
+    d,_=detector_stub(True)
+    d.rescue_config['retry_partial']=True
+    original=hand();duplicate=hand(original.pixel_landmarks+1);duplicate.handedness='Right'
+    extra=hand(original.pixel_landmarks+[150,0]);extra.handedness='Right'
+    crops=[]
+    def infer(image,timestamp_ns=0,image_mode=False):
+        if not image_mode:return [original]
+        crops.append(image.shape)
+        return [duplicate] if len(crops)==1 else [extra]
+    d._detect_single=infer
+    result=d.detect(np.zeros((480,640,3),np.uint8),123)
+    assert result[0] is original and len(result)==2 and len(crops)==2
+    np.testing.assert_allclose(result[1].pixel_landmarks,extra.pixel_landmarks+[224,0])
+    assert d.last_detection_diagnostics['rescue_hands']==1
+    assert result[1].origin=='mediapipe_tiled_rescue' and result[1].valid.all()
+
+
+def test_partial_retry_cadence_never_reuses_old_points_or_skips_main_video_frame():
+    d,_=detector_stub(True)
+    d.rescue_config.update(retry_partial=True,partial_retry_interval_frames=3)
+    calls=[]
+    def infer(image,timestamp_ns=0,image_mode=False):
+        calls.append((timestamp_ns,image_mode))
+        return [] if image_mode else [hand()]
+    d._detect_single=infer
+    for stamp in range(1,5):
+        assert len(d.detect(np.zeros((480,640,3),np.uint8),stamp))==1
+    assert [stamp for stamp,crop in calls if not crop]==[1,2,3,4]
+    assert [stamp for stamp,crop in calls if crop]==[1]*4+[4]*4
+
+
+def test_complete_two_hand_frame_does_not_run_partial_rescue():
+    d,_=detector_stub(True);d.rescue_config['retry_partial']=True
+    calls=[]
+    def infer(image,timestamp_ns=0,image_mode=False):
+        calls.append(image_mode)
+        return [hand(),hand(hand().pixel_landmarks+[150,0])]
+    d._detect_single=infer
+    assert len(d.detect(np.zeros((480,640,3),np.uint8),123))==2
+    assert calls==[False]
+
+
+def test_current_hand_roi_restores_pixels_retains_originals_and_context_label():
+    d,_=detector_stub(True)
+    d.rescue_config.update(enabled=False,refine_full_frame=True)
+    original=hand(hand().pixel_landmarks+[100,100])
+    observed=[]
+    def infer(image,timestamp_ns=0,image_mode=False):
+        if not image_mode:return [original]
+        observed.append((image.shape,timestamp_ns))
+        # The deterministic 128px crop begins at x=76,y=96 for this hand.
+        candidate=hand(original.pixel_landmarks-[76,96]+1)
+        candidate.handedness='Right'
+        return [candidate]
+    d._detect_single=infer
+    result=d.detect(np.zeros((480,640,3),np.uint8),123)
+    assert len(observed)==1 and observed[0][1]==123
+    assert result[0].origin=='mediapipe_roi_refinement'
+    assert result[0].handedness==original.handedness
+    np.testing.assert_allclose(result[0].pixel_landmarks,original.pixel_landmarks+1)
+    assert d.last_detection_diagnostics['full_frame_observations'][0] is original
+    np.testing.assert_allclose(original.pixel_landmarks,hand().pixel_landmarks+[100,100])
+
+
+def test_roi_refinement_rejects_observation_shared_by_two_original_hands():
+    d,_=detector_stub(True);d.rescue_config.update(enabled=False,refine_full_frame=True)
+    originals=[hand(hand().pixel_landmarks+[100,100]),hand(hand().pixel_landmarks+[102,100])]
+    def infer(image,timestamp_ns=0,image_mode=False):
+        if not image_mode:return originals.copy()
+        # First crop x=76 and second x=78; both candidates are spatially
+        # indistinguishable from two originals, so neither may replace a hand.
+        return [hand(hand().pixel_landmarks+[24,4])]
+    d._detect_single=infer
+    result=d.detect(np.zeros((480,640,3),np.uint8),123)
+    assert all(a is b for a,b in zip(result,originals))
+    assert d.last_detection_diagnostics['refined_hands']==0
+
 def test_realtime_rescue_rotates_tiles_without_changing_pixel_coordinates():
     d,_=detector_stub(False);d.rescue_config['max_crops_per_frame']=1
     image=np.zeros((480,640,3),np.uint8);image[:240,:320]=17;image[:240,320:]=41

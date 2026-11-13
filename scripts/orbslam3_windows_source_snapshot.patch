@@ -1,0 +1,1516 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 016e743..a3c532b 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -7,6 +7,19 @@ ENDIF()
+ 
+ MESSAGE("Build type: " ${CMAKE_BUILD_TYPE})
+ 
++# Native Windows/MSVC uses its own C++ standard options; keep upstream GCC flags elsewhere.
++if(MSVC)
++  # Heavy Eigen/g2o template units such as Optimizer.cc exceed MSVC's default COFF section count.
++  add_compile_options(/bigobj)
++  set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
++  # Exporting all ORB-SLAM3 template symbols from a Windows DLL exceeds LINK LNK1189 limits.
++  # Build the large core as a static library; keep DBoW2/g2o existing target types unchanged.
++  set(ORB_SLAM3_LIB_TYPE STATIC)
++  set(CMAKE_CXX_STANDARD 17)
++  set(CMAKE_CXX_STANDARD_REQUIRED ON)
++  add_definitions(-DCOMPILEDWITHC11 -DWINDOWS -D_WINDOWS)
++else()
++set(ORB_SLAM3_LIB_TYPE SHARED)
+ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS}  -Wall   -O3")
+ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall   -O3")
+ set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -march=native")
+@@ -18,7 +31,7 @@ CHECK_CXX_COMPILER_FLAG("-std=c++11" COMPILER_SUPPORTS_CXX11)
+ CHECK_CXX_COMPILER_FLAG("-std=c++0x" COMPILER_SUPPORTS_CXX0X)
+ if(COMPILER_SUPPORTS_CXX11)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
+-   add_definitions(-DCOMPILEDWITHC11)
++   add_definitions(-DCOMPILEDWITHC11 -DWINDOWS -D_WINDOWS)
+    message(STATUS "Using flag -std=c++11.")
+ elseif(COMPILER_SUPPORTS_CXX0X)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++0x")
+@@ -28,6 +41,8 @@ else()
+    message(FATAL_ERROR "The compiler ${CMAKE_CXX_COMPILER} has no C++11 support. Please use a different C++ compiler.")
+ endif()
+ 
++endif()
++
+ LIST(APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake_modules)
+ 
+ find_package(OpenCV 4.4)
+@@ -53,7 +68,7 @@ ${Pangolin_INCLUDE_DIRS}
+ 
+ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/lib)
+ 
+-add_library(${PROJECT_NAME} SHARED
++add_library(${PROJECT_NAME} ${ORB_SLAM3_LIB_TYPE}
+ src/System.cc
+ src/Tracking.cc
+ src/LocalMapping.cc
+@@ -113,6 +128,13 @@ include/SerializationUtils.h
+ include/Config.h
+ include/Settings.h)
+ 
++if(MSVC)
++  add_subdirectory(Thirdparty/DBoW2)
++  add_subdirectory(Thirdparty/g2o)
++  find_package(Boost REQUIRED COMPONENTS serialization)
++  find_package(OpenSSL REQUIRED)
++  target_link_libraries(${PROJECT_NAME} ${OpenCV_LIBS} ${Pangolin_LIBRARIES} DBoW2 g2o Boost::serialization OpenSSL::Crypto)
++else()
+ add_subdirectory(Thirdparty/g2o)
+ 
+ target_link_libraries(${PROJECT_NAME}
+@@ -125,6 +147,8 @@ ${PROJECT_SOURCE_DIR}/Thirdparty/g2o/lib/libg2o.so
+ -lcrypto
+ )
+ 
++endif()
++
+ # If RealSense SDK is found the library is added and its examples compiled
+ if(realsense2_FOUND)
+     include_directories(${PROJECT_NAME}
+diff --git a/Examples/Stereo-Inertial/stereo_inertial_tum_vi.cc b/Examples/Stereo-Inertial/stereo_inertial_tum_vi.cc
+index 2abe614..b0757f1 100644
+--- a/Examples/Stereo-Inertial/stereo_inertial_tum_vi.cc
++++ b/Examples/Stereo-Inertial/stereo_inertial_tum_vi.cc
+@@ -119,7 +119,7 @@ int main(int argc, char **argv)
+     cout << "IMU data in the sequence: " << nImu << endl << endl;*/
+ 
+     // Create SLAM system. It initializes all system threads and gets ready to process frames.
+-    ORB_SLAM3::System SLAM(argv[1],argv[2],ORB_SLAM3::System::IMU_STEREO, true, 0, file_name);
++    ORB_SLAM3::System SLAM(argv[1],argv[2],ORB_SLAM3::System::IMU_STEREO, false, 0, file_name);
+     float imageScale = SLAM.GetImageScale();
+ 
+     double t_resize = 0.f;
+diff --git a/Examples/Stereo/stereo_euroc.cc b/Examples/Stereo/stereo_euroc.cc
+index 1250f2e..0aa89ce 100644
+--- a/Examples/Stereo/stereo_euroc.cc
++++ b/Examples/Stereo/stereo_euroc.cc
+@@ -88,7 +88,7 @@ int main(int argc, char **argv)
+     cout.precision(17);
+ 
+     // Create SLAM system. It initializes all system threads and gets ready to process frames.
+-    ORB_SLAM3::System SLAM(argv[1],argv[2],ORB_SLAM3::System::STEREO, true);
++    ORB_SLAM3::System SLAM(argv[1],argv[2],ORB_SLAM3::System::STEREO, false);
+ 
+     cv::Mat imLeft, imRight;
+     for (seq = 0; seq<num_seq; seq++)
+diff --git a/Examples/Stereo/stereo_tum_vi.cc b/Examples/Stereo/stereo_tum_vi.cc
+index 20a3ecf..e56d64b 100644
+--- a/Examples/Stereo/stereo_tum_vi.cc
++++ b/Examples/Stereo/stereo_tum_vi.cc
+@@ -1,8 +1,8 @@
+ /**
+ * This file is part of ORB-SLAM3
+ *
+-* Copyright (C) 2017-2021 Carlos Campos, Richard Elvira, Juan J. Gómez Rodríguez, José M.M. Montiel and Juan D. Tardós, University of Zaragoza.
+-* Copyright (C) 2014-2016 Raúl Mur-Artal, José M.M. Montiel and Juan D. Tardós, University of Zaragoza.
++* Copyright (C) 2017-2021 Carlos Campos, Richard Elvira, Juan J. G贸mez Rodr铆guez, Jos茅 M.M. Montiel and Juan D. Tard贸s, University of Zaragoza.
++* Copyright (C) 2014-2016 Ra煤l Mur-Artal, Jos茅 M.M. Montiel and Juan D. Tard贸s, University of Zaragoza.
+ *
+ * ORB-SLAM3 is free software: you can redistribute it and/or modify it under the terms of the GNU General Public
+ * License as published by the Free Software Foundation, either version 3 of the License, or
+@@ -21,7 +21,7 @@
+ #include<fstream>
+ #include<iomanip>
+ #include<chrono>
+-#include <unistd.h>
++#include "windows_compat.h"
+ 
+ #include<opencv2/core/core.hpp>
+ 
+@@ -90,7 +90,7 @@ int main(int argc, char **argv)
+     cout.precision(17);
+ 
+     // Create SLAM system. It initializes all system threads and gets ready to process frames.
+-    ORB_SLAM3::System SLAM(argv[1],argv[2],ORB_SLAM3::System::STEREO,true);
++    ORB_SLAM3::System SLAM(argv[1],argv[2],ORB_SLAM3::System::STEREO,false);
+     float imageScale = SLAM.GetImageScale();
+ 
+     cout << endl << "-------" << endl;
+diff --git a/Thirdparty/DBoW2/CMakeLists.txt b/Thirdparty/DBoW2/CMakeLists.txt
+index c312b25..ef06b0a 100644
+--- a/Thirdparty/DBoW2/CMakeLists.txt
++++ b/Thirdparty/DBoW2/CMakeLists.txt
+@@ -5,9 +5,12 @@ if(NOT CMAKE_BUILD_TYPE)
+   set(CMAKE_BUILD_TYPE Release)
+ endif()
+ 
++if(NOT MSVC)
+ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS}  -Wall  -O3 -march=native ")
+ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall  -O3 -march=native")
+ 
++endif()
++
+ set(HDRS_DBOW2
+   DBoW2/BowVector.h
+   DBoW2/FORB.h 
+@@ -40,6 +43,11 @@ endif()
+ set(LIBRARY_OUTPUT_PATH ${PROJECT_SOURCE_DIR}/lib)
+ 
+ include_directories(${OpenCV_INCLUDE_DIRS})
+-add_library(DBoW2 SHARED ${SRCS_DBOW2} ${SRCS_DUTILS})
++if(MSVC)
++  set(DBOW2_LIB_TYPE STATIC) # Keep FORB::L and other data symbols available to the static ORB core.
++else()
++  set(DBOW2_LIB_TYPE SHARED)
++endif()
++add_library(DBoW2 ${DBOW2_LIB_TYPE} ${SRCS_DBOW2} ${SRCS_DUTILS})
+ target_link_libraries(DBoW2 ${OpenCV_LIBS})
+ 
+diff --git a/Thirdparty/DBoW2/DBoW2/FORB.cpp b/Thirdparty/DBoW2/DBoW2/FORB.cpp
+index 1f1990c..80bf473 100644
+--- a/Thirdparty/DBoW2/DBoW2/FORB.cpp
++++ b/Thirdparty/DBoW2/DBoW2/FORB.cpp
+@@ -13,7 +13,7 @@
+ #include <vector>
+ #include <string>
+ #include <sstream>
+-#include <stdint-gcc.h>
++#include <stdint.h>
+ 
+ #include "FORB.h"
+ 
+diff --git a/Thirdparty/g2o/CMakeLists.txt b/Thirdparty/g2o/CMakeLists.txt
+index 1a32ff9..341aa2a 100644
+--- a/Thirdparty/g2o/CMakeLists.txt
++++ b/Thirdparty/g2o/CMakeLists.txt
+@@ -13,7 +13,11 @@ endif()
+ 
+ MESSAGE(STATUS "BUILD TYPE:" ${CMAKE_BUILD_TYPE})
+ 
+-SET (G2O_LIB_TYPE SHARED)
++IF(MSVC)
++  SET(G2O_LIB_TYPE STATIC) # Keep G2OBatchStatistics static data and other non-exported symbols linkable.
++ELSE()
++  SET(G2O_LIB_TYPE SHARED)
++ENDIF()
+ 
+ # There seems to be an issue with MSVC8
+ # see http://eigen.tuxfamily.org/bz/show_bug.cgi?id=83
+@@ -53,6 +57,7 @@ IF(OPENMP_FOUND AND G2O_USE_OPENMP)
+   MESSAGE(STATUS "Compiling with OpenMP support")
+ ENDIF(OPENMP_FOUND AND G2O_USE_OPENMP)
+ 
++if(NOT MSVC)
+ # Compiler specific options for gcc
+ SET(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -march=native")
+ SET(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -O3 -march=native")
+@@ -63,6 +68,8 @@ SET(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -O3 -march=native")
+ SET(g2o_C_FLAGS "${g2o_C_FLAGS} -Wall -W")
+ SET(g2o_CXX_FLAGS "${g2o_CXX_FLAGS} -Wall -W")
+ 
++endif()
++
+ # specifying compiler flags
+ SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${g2o_CXX_FLAGS}")
+ SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${g2o_C_FLAGS}")
+diff --git a/Thirdparty/g2o/g2o/core/estimate_propagator.h b/Thirdparty/g2o/g2o/core/estimate_propagator.h
+index 6a16d11..25967e0 100644
+--- a/Thirdparty/g2o/g2o/core/estimate_propagator.h
++++ b/Thirdparty/g2o/g2o/core/estimate_propagator.h
+@@ -135,7 +135,11 @@ namespace g2o {
+           size_t operator ()(const OptimizableGraph::Vertex* v) const { return v->id();}
+       };
+ 
++#ifdef _MSC_VER
++      typedef std::unordered_map<OptimizableGraph::Vertex*, AdjacencyMapEntry, VertexIDHashFunction> AdjacencyMap;
++#else
+       typedef std::tr1::unordered_map<OptimizableGraph::Vertex*, AdjacencyMapEntry, VertexIDHashFunction> AdjacencyMap;
++#endif
+ 
+     public:
+       EstimatePropagator(OptimizableGraph* g);
+diff --git a/Thirdparty/g2o/g2o/core/hyper_graph.h b/Thirdparty/g2o/g2o/core/hyper_graph.h
+index da6bb3d..a108759 100644
+--- a/Thirdparty/g2o/g2o/core/hyper_graph.h
++++ b/Thirdparty/g2o/g2o/core/hyper_graph.h
+@@ -90,7 +90,11 @@ namespace g2o {
+       typedef std::set<Edge*>                           EdgeSet;
+       typedef std::set<Vertex*>                         VertexSet;
+ 
++#ifdef _MSC_VER
++      typedef std::unordered_map<int, Vertex*>     VertexIDMap;
++#else
+       typedef std::tr1::unordered_map<int, Vertex*>     VertexIDMap;
++#endif
+       typedef std::vector<Vertex*>                      VertexContainer;
+ 
+       //! abstract Vertex, your types must derive from that one
+diff --git a/Thirdparty/g2o/g2o/core/marginal_covariance_cholesky.h b/Thirdparty/g2o/g2o/core/marginal_covariance_cholesky.h
+index e7dfce8..571c911 100644
+--- a/Thirdparty/g2o/g2o/core/marginal_covariance_cholesky.h
++++ b/Thirdparty/g2o/g2o/core/marginal_covariance_cholesky.h
+@@ -50,7 +50,11 @@ namespace g2o {
+       /**
+        * hash struct for storing the matrix elements needed to compute the covariance
+        */
++#ifdef _MSC_VER
++      typedef std::unordered_map<int, double>     LookupMap;
++#else
+       typedef std::tr1::unordered_map<int, double>     LookupMap;
++#endif
+     
+     public:
+       MarginalCovarianceCholesky();
+diff --git a/Thirdparty/g2o/g2o/core/robust_kernel.h b/Thirdparty/g2o/g2o/core/robust_kernel.h
+index 29e1394..b4987b7 100644
+--- a/Thirdparty/g2o/g2o/core/robust_kernel.h
++++ b/Thirdparty/g2o/g2o/core/robust_kernel.h
+@@ -74,7 +74,11 @@ namespace g2o {
+     protected:
+       double _delta;
+   };
++#ifdef _MSC_VER
++  typedef std::shared_ptr<RobustKernel> RobustKernelPtr;
++#else
+   typedef std::tr1::shared_ptr<RobustKernel> RobustKernelPtr;
++#endif
+ 
+ } // end namespace g2o
+ 
+diff --git a/Thirdparty/g2o/g2o/core/sparse_block_matrix_ccs.h b/Thirdparty/g2o/g2o/core/sparse_block_matrix_ccs.h
+index eb9042c..ee31659 100644
+--- a/Thirdparty/g2o/g2o/core/sparse_block_matrix_ccs.h
++++ b/Thirdparty/g2o/g2o/core/sparse_block_matrix_ccs.h
+@@ -223,7 +223,11 @@ namespace g2o {
+       //! rows of the matrix
+       int rows() const {return _rowBlockIndices.size() ? _rowBlockIndices.back() : 0;}
+ 
++#ifdef _MSC_VER
++      typedef std::unordered_map<int, MatrixType*> SparseColumn;
++#else
+       typedef std::tr1::unordered_map<int, MatrixType*> SparseColumn;
++#endif
+ 
+       SparseBlockMatrixHashMap(const std::vector<int>& rowIndices, const std::vector<int>& colIndices) :
+         _rowBlockIndices(rowIndices), _colBlockIndices(colIndices)
+diff --git a/include/Config.h b/include/Config.h
+index 20f3a0b..b5d1fc6 100644
+--- a/include/Config.h
++++ b/include/Config.h
+@@ -1,8 +1,8 @@
+ /**
+ * This file is part of ORB-SLAM3
+ *
+-* Copyright (C) 2017-2021 Carlos Campos, Richard Elvira, Juan J. Gómez Rodríguez, José M.M. Montiel and Juan D. Tardós, University of Zaragoza.
+-* Copyright (C) 2014-2016 Raúl Mur-Artal, José M.M. Montiel and Juan D. Tardós, University of Zaragoza.
++* Copyright (C) 2017-2021 Carlos Campos, Richard Elvira, Juan J. G贸mez Rodr铆guez, Jos茅 M.M. Montiel and Juan D. Tard贸s, University of Zaragoza.
++* Copyright (C) 2014-2016 Ra煤l Mur-Artal, Jos茅 M.M. Montiel and Juan D. Tard贸s, University of Zaragoza.
+ *
+ * ORB-SLAM3 is free software: you can redistribute it and/or modify it under the terms of the GNU General Public
+ * License as published by the Free Software Foundation, either version 3 of the License, or
+@@ -19,7 +19,7 @@
+ #ifndef CONFIG_H
+ #define CONFIG_H
+ 
+-#include <unistd.h>
++#include "windows_compat.h"
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string>
+diff --git a/include/LocalMapping.h b/include/LocalMapping.h
+index dd04a3d..9ce373d 100644
+--- a/include/LocalMapping.h
++++ b/include/LocalMapping.h
+@@ -179,7 +179,7 @@ protected:
+     bool mbAcceptKeyFrames;
+     std::mutex mMutexAccept;
+ 
+-    void InitializeIMU(float priorG = 1e2, float priorA = 1e6, bool bFirst = false);
++    bool InitializeIMU(float priorG = 1e2, float priorA = 1e6, bool bFirst = false);
+     void ScaleRefinement();
+ 
+     bool bInitializing;
+diff --git a/include/LoopClosing.h b/include/LoopClosing.h
+index c9ccb26..61391ff 100644
+--- a/include/LoopClosing.h
++++ b/include/LoopClosing.h
+@@ -1,8 +1,8 @@
+ /**
+ * This file is part of ORB-SLAM3
+ *
+-* Copyright (C) 2017-2021 Carlos Campos, Richard Elvira, Juan J. Gómez Rodríguez, José M.M. Montiel and Juan D. Tardós, University of Zaragoza.
+-* Copyright (C) 2014-2016 Raúl Mur-Artal, José M.M. Montiel and Juan D. Tardós, University of Zaragoza.
++* Copyright (C) 2017-2021 Carlos Campos, Richard Elvira, Juan J. G贸mez Rodr铆guez, Jos茅 M.M. Montiel and Juan D. Tard贸s, University of Zaragoza.
++* Copyright (C) 2014-2016 Ra煤l Mur-Artal, Jos茅 M.M. Montiel and Juan D. Tard贸s, University of Zaragoza.
+ *
+ * ORB-SLAM3 is free software: you can redistribute it and/or modify it under the terms of the GNU General Public
+ * License as published by the Free Software Foundation, either version 3 of the License, or
+@@ -223,7 +223,7 @@ protected:
+     bool mbFixScale;
+ 
+ 
+-    bool mnFullBAIdx;
++    int mnFullBAIdx; // Generation counter used to reject stale global BA results.
+ 
+ 
+ 
+diff --git a/include/Settings.h b/include/Settings.h
+index beab7de..14c7e3b 100644
+--- a/include/Settings.h
++++ b/include/Settings.h
+@@ -1,8 +1,8 @@
+ /**
+ * This file is part of ORB-SLAM3
+ *
+-* Copyright (C) 2017-2021 Carlos Campos, Richard Elvira, Juan J. Gómez Rodríguez, José M.M. Montiel and Juan D. Tardós, University of Zaragoza.
+-* Copyright (C) 2014-2016 Raúl Mur-Artal, José M.M. Montiel and Juan D. Tardós, University of Zaragoza.
++* Copyright (C) 2017-2021 Carlos Campos, Richard Elvira, Juan J. G贸mez Rodr铆guez, Jos茅 M.M. Montiel and Juan D. Tard贸s, University of Zaragoza.
++* Copyright (C) 2014-2016 Ra煤l Mur-Artal, Jos茅 M.M. Montiel and Juan D. Tard贸s, University of Zaragoza.
+ *
+ * ORB-SLAM3 is free software: you can redistribute it and/or modify it under the terms of the GNU General Public
+ * License as published by the Free Software Foundation, either version 3 of the License, or
+@@ -25,7 +25,7 @@
+ 
+ #include "CameraModels/GeometricCamera.h"
+ 
+-#include <unistd.h>
++#include "windows_compat.h"
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string>
+diff --git a/include/System.h b/include/System.h
+index 872c86e..9d64b0a 100644
+--- a/include/System.h
++++ b/include/System.h
+@@ -1,8 +1,8 @@
+ /**
+ * This file is part of ORB-SLAM3
+ *
+-* Copyright (C) 2017-2021 Carlos Campos, Richard Elvira, Juan J. Gómez Rodríguez, José M.M. Montiel and Juan D. Tardós, University of Zaragoza.
+-* Copyright (C) 2014-2016 Raúl Mur-Artal, José M.M. Montiel and Juan D. Tardós, University of Zaragoza.
++* Copyright (C) 2017-2021 Carlos Campos, Richard Elvira, Juan J. G贸mez Rodr铆guez, Jos茅 M.M. Montiel and Juan D. Tard贸s, University of Zaragoza.
++* Copyright (C) 2014-2016 Ra煤l Mur-Artal, Jos茅 M.M. Montiel and Juan D. Tard贸s, University of Zaragoza.
+ *
+ * ORB-SLAM3 is free software: you can redistribute it and/or modify it under the terms of the GNU General Public
+ * License as published by the Free Software Foundation, either version 3 of the License, or
+@@ -21,10 +21,11 @@
+ #define SYSTEM_H
+ 
+ 
+-#include <unistd.h>
++#include "windows_compat.h"
+ #include<stdio.h>
+ #include<stdlib.h>
+ #include<string>
++#include<functional>
+ #include<thread>
+ #include<opencv2/core/core.hpp>
+ 
+@@ -133,11 +134,14 @@ public:
+     // Reset the system (clear Atlas or the active map)
+     void Reset();
+     void ResetActiveMap();
++    // Coordinate-system epoch for trajectory segmentation.
++    unsigned long long GetMapEpoch();
+ 
+     // All threads will be requested to finish.
+     // It waits until all threads have finished.
+     // This function must be called before saving the trajectory.
+     void Shutdown();
++    void ExportMap(const string &atlasFile, const string &poseFile);
+     bool isShutDown();
+ 
+     // Save camera trajectory in the TUM RGB-D dataset format.
+@@ -174,6 +178,12 @@ public:
+     // Information from most recent processed frame
+     // You can call this right after TrackMonocular (or stereo or RGBD)
+     int GetTrackingState();
++    bool GetLatestInertialBodyState(Eigen::Matrix4f& Twb, Eigen::Vector3f& velocity,
++                                    Eigen::Matrix<float,6,1>& bias, bool& ba2);
++    /* 惯性初始化和 VIBA2 是否完成；双目已有基线尺度，精度仍需验证。 */
++    bool IsInertialScaleFinalized();
++    void SetRecoveryCandidateCheck(std::function<int(const Eigen::Matrix4f&, unsigned long long)> check);
++    std::function<int(const Eigen::Matrix4f&, unsigned long long)> GetRecoveryCandidateCheck();
+     std::vector<MapPoint*> GetTrackedMapPoints();
+     std::vector<cv::KeyPoint> GetTrackedKeyPointsUn();
+ 
+@@ -240,6 +250,7 @@ private:
+     std::mutex mMutexReset;
+     bool mbReset;
+     bool mbResetActiveMap;
++    unsigned long long mMapResetRevision = 0;
+ 
+     // Change mode flags
+     std::mutex mMutexMode;
+diff --git a/src/Frame.cc b/src/Frame.cc
+index a04c312..fa581bf 100644
+--- a/src/Frame.cc
++++ b/src/Frame.cc
+@@ -130,15 +130,16 @@ Frame::Frame(const cv::Mat &imLeft, const cv::Mat &imRight, const double &timeSt
+ #endif
+ 
+     N = mvKeys.size();
+-    if(mvKeys.empty())
+-        return;
+-
+-    UndistortKeyPoints();
++    mb = mbf / mK_(0,0);
++    // A frame with no features still participates in IMU preintegration.
++    if(N > 0)
++        UndistortKeyPoints();
+ 
+ #ifdef REGISTER_TIMES
+     std::chrono::steady_clock::time_point time_StartStereoMatches = std::chrono::steady_clock::now();
+ #endif
+-    ComputeStereoMatches();
++    if(N > 0)
++        ComputeStereoMatches();
+ #ifdef REGISTER_TIMES
+     std::chrono::steady_clock::time_point time_EndStereoMatches = std::chrono::steady_clock::now();
+ 
+@@ -171,8 +172,6 @@ Frame::Frame(const cv::Mat &imLeft, const cv::Mat &imRight, const double &timeSt
+         mbInitialComputations=false;
+     }
+ 
+-    mb = mbf/fx;
+-
+     if(pPrevF)
+     {
+         if(pPrevF->HasVelocity())
+@@ -964,6 +963,8 @@ void Frame::ComputeStereoMatches()
+         }
+     }
+ 
++    if(vDistIdx.empty())
++        return;
+     sort(vDistIdx.begin(),vDistIdx.end());
+     const float median = vDistIdx[vDistIdx.size()/2].first;
+     const float thDist = 1.5f*1.4f*median;
+diff --git a/src/LocalMapping.cc b/src/LocalMapping.cc
+index 53df332..69c0bea 100644
+--- a/src/LocalMapping.cc
++++ b/src/LocalMapping.cc
+@@ -35,6 +35,9 @@ LocalMapping::LocalMapping(System* pSys, Atlas *pAtlas, const float bMonocular,
+     mbAbortBA(false), mbStopped(false), mbStopRequested(false), mbNotStop(false), mbAcceptKeyFrames(true),
+     mIdxInit(0), mScale(1.0), mInitSect(0), mbNotBA1(true), mbNotBA2(true), mIdxIteration(0), infoInertial(Eigen::MatrixXd::Zero(9,9))
+ {
++    // 在首个关键帧进入局部建图线程之前，实时状态查询也可能发生。
++    mpCurrentKeyFrame = nullptr;
++    mFirstTs = 0.0;
+     mnMatchesInliers = 0;
+ 
+     mbBadImu = false;
+@@ -133,7 +136,8 @@ void LocalMapping::Run()
+ 
+                         if(dist>0.05)
+                             mTinit += mpCurrentKeyFrame->mTimeStamp - mpCurrentKeyFrame->mPrevKF->mTimeStamp;
+-                        if(!mpCurrentKeyFrame->GetMap()->GetIniertialBA2())
++                        if(mpTracker->mSensor != System::IMU_STEREO &&
++                           !mpCurrentKeyFrame->GetMap()->GetIniertialBA2())
+                         {
+                             if((mTinit<10.f) && (dist<0.02))
+                             {
+@@ -217,13 +221,12 @@ void LocalMapping::Run()
+                         else if(!mpCurrentKeyFrame->GetMap()->GetIniertialBA2()){
+                             if (mTinit>15.0f){
+                                 cout << "start VIBA 2" << endl;
+-                                mpCurrentKeyFrame->GetMap()->SetIniertialBA2();
+-                                if (mbMonocular)
+-                                    InitializeIMU(0.f, 0.f, true);
+-                                else
+-                                    InitializeIMU(0.f, 0.f, true);
++                                // BA2 在地图优化真正成功后才对外发布。
++                                const bool ba2Completed = InitializeIMU(0.f, 0.f, true);
++                                if (ba2Completed)
++                                    mpCurrentKeyFrame->GetMap()->SetIniertialBA2();
+ 
+-                                cout << "end VIBA 2" << endl;
++                                cout << (ba2Completed ? "end VIBA 2" : "VIBA 2 incomplete") << endl;
+                             }
+                         }
+ 
+@@ -488,7 +491,8 @@ void LocalMapping::CreateNewMapPoints()
+             const cv::KeyPoint &kp1 = (mpCurrentKeyFrame -> NLeft == -1) ? mpCurrentKeyFrame->mvKeysUn[idx1]
+                                                                          : (idx1 < mpCurrentKeyFrame -> NLeft) ? mpCurrentKeyFrame -> mvKeys[idx1]
+                                                                                                                : mpCurrentKeyFrame -> mvKeysRight[idx1 - mpCurrentKeyFrame -> NLeft];
+-            const float kp1_ur=mpCurrentKeyFrame->mvuRight[idx1];
++            // 双鱼眼 mvuRight 只按左图特征分配；右图索引不可访问该数组。
++            const float kp1_ur=mpCurrentKeyFrame->mpCamera2 ? -1.0f : mpCurrentKeyFrame->mvuRight[idx1];
+             bool bStereo1 = (!mpCurrentKeyFrame->mpCamera2 && kp1_ur>=0);
+             const bool bRight1 = (mpCurrentKeyFrame -> NLeft == -1 || idx1 < mpCurrentKeyFrame -> NLeft) ? false
+                                                                                                          : true;
+@@ -497,7 +501,7 @@ void LocalMapping::CreateNewMapPoints()
+                                                             : (idx2 < pKF2 -> NLeft) ? pKF2 -> mvKeys[idx2]
+                                                                                      : pKF2 -> mvKeysRight[idx2 - pKF2 -> NLeft];
+ 
+-            const float kp2_ur = pKF2->mvuRight[idx2];
++            const float kp2_ur = pKF2->mpCamera2 ? -1.0f : pKF2->mvuRight[idx2];
+             bool bStereo2 = (!pKF2->mpCamera2 && kp2_ur>=0);
+             const bool bRight2 = (pKF2 -> NLeft == -1 || idx2 < pKF2 -> NLeft) ? false
+                                                                                : true;
+@@ -941,7 +945,9 @@ void LocalMapping::KeyFrameCulling()
+         count++;
+         KeyFrame* pKF = *vit;
+ 
+-        if((pKF->mnId==pKF->GetMap()->GetInitKFid()) || pKF->isBad())
++        // Culling needs a parent to reattach children and preserve trajectory
++        // references. Keep disconnected keyframes until they have a parent.
++        if((pKF->mnId==pKF->GetMap()->GetInitKFid()) || pKF->isBad() || !pKF->GetParent())
+             continue;
+         const vector<MapPoint*> vpMapPoints = pKF->GetMapPointMatches();
+ 
+@@ -958,6 +964,9 @@ void LocalMapping::KeyFrameCulling()
+                 {
+                     if(!mbMonocular)
+                     {
++                        // 双鱼眼深度仅对应左图特征；右图特征不参与近点关键帧剔除。
++                        if(i >= pKF->mvDepth.size())
++                            continue;
+                         if(pKF->mvDepth[i]>pKF->mThDepth || pKF->mvDepth[i]<0)
+                             continue;
+                     }
+@@ -1170,10 +1179,10 @@ bool LocalMapping::isFinished()
+     return mbFinished;
+ }
+ 
+-void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
++bool LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
+ {
+     if (mbResetRequested)
+-        return;
++        return false;
+ 
+     float minTime;
+     int nMinKF;
+@@ -1190,7 +1199,7 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
+ 
+ 
+     if(mpAtlas->KeyFramesInMap()<nMinKF)
+-        return;
++        return false;
+ 
+     // Retrieve all keyframe in temporal order
+     list<KeyFrame*> lpKF;
+@@ -1204,11 +1213,28 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
+     vector<KeyFrame*> vpKF(lpKF.begin(),lpKF.end());
+ 
+     if(vpKF.size()<nMinKF)
+-        return;
++        return false;
+ 
+     mFirstTs=vpKF.front()->mTimeStamp;
+     if(mpCurrentKeyFrame->mTimeStamp-mFirstTs<minTime)
+-        return;
++        return false;
++
++    if (mpTracker->mSensor == System::IMU_STEREO &&
++        !mpCurrentKeyFrame->GetMap()->isImuInitialized())
++    {
++        // Keep the metric stereo map while the IMU lacks translation. Measure
++        // at the IMU origin so camera motion due to the lever arm does not
++        // count as translation during rotation about the IMU.
++        constexpr float minTranslation = 0.05f;
++        const Eigen::Vector3f origin = vpKF.front()->GetImuPosition();
++        const bool translated = std::any_of(vpKF.begin() + 1, vpKF.end(),
++            [&origin, minTranslation](KeyFrame* keyframe) {
++                return (keyframe->GetImuPosition() - origin).squaredNorm()
++                    >= minTranslation * minTranslation;
++            });
++        if (!translated)
++            return false;
++    }
+ 
+     bInitializing = true;
+ 
+@@ -1272,7 +1298,7 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
+     {
+         cout << "scale too small" << endl;
+         bInitializing=false;
+-        return;
++        return false;
+     }
+ 
+     // Before this line we are not changing the map
+@@ -1281,6 +1307,8 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
+         if ((fabs(mScale - 1.f) > 0.00001) || !mbMonocular) {
+             Sophus::SE3f Twg(mRwg.cast<float>().transpose(), Eigen::Vector3f::Zero());
+             mpAtlas->GetCurrentMap()->ApplyScaledRotation(Twg, mScale, true);
++            // 重力/尺度修正会改变坐标，旧 IMU 外推锚点不能跨越该边界。
++            mpAtlas->GetCurrentMap()->InformNewBigChange();
+             mpTracker->UpdateFrameIMU(mScale, vpKF[0]->GetImuBias(), mpCurrentKeyFrame);
+         }
+ 
+@@ -1422,8 +1450,10 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
+     bInitializing = false;
+ 
+     mpCurrentKeyFrame->GetMap()->IncreaseChangeIndex();
++    // 全局惯性 BA 更新了整个地图，不得继续使用更新前的坐标锚点。
++    mpCurrentKeyFrame->GetMap()->InformNewBigChange();
+ 
+-    return;
++    return true;
+ }
+ 
+ void LocalMapping::ScaleRefinement()
+diff --git a/src/LoopClosing.cc b/src/LoopClosing.cc
+index 319afb5..9e52a3d 100644
+--- a/src/LoopClosing.cc
++++ b/src/LoopClosing.cc
+@@ -98,7 +98,7 @@ void LoopClosing::Run()
+         //----------------------------
+ 
+ 
+-        if(CheckNewKeyFrames())
++        if(mbActiveLC && CheckNewKeyFrames())
+         {
+             if(mpLastCurrentKF)
+             {
+diff --git a/src/MLPnPsolver.cpp b/src/MLPnPsolver.cpp
+index 2f8702b..1907d54 100644
+--- a/src/MLPnPsolver.cpp
++++ b/src/MLPnPsolver.cpp
+@@ -52,6 +52,8 @@
+ 
+ 
+ namespace ORB_SLAM3 {
++    MLPnPsolver::~MLPnPsolver() = default;
++
+     MLPnPsolver::MLPnPsolver(const Frame &F, const vector<MapPoint *> &vpMapPointMatches):
+             mnInliersi(0), mnIterations(0), mnBestInliers(0), N(0), mpCamera(F.mpCamera){
+         mvpMapPointMatches = vpMapPointMatches;
+diff --git a/src/Map.cc b/src/Map.cc
+index f1f8cd0..b984054 100644
+--- a/src/Map.cc
++++ b/src/Map.cc
+@@ -280,6 +280,9 @@ void Map::ApplyScaledRotation(const Sophus::SE3f &T, const float s, const bool b
+         pMP->UpdateNormalAndDepth();
+     }
+     mnMapChange++;
++    // 整图 Sim3 重缩放改变了世界坐标系本身，旧坐标下的位姿与 IMU 锚点
++    // 不能与新坐标直接比较。必须计入大变化序号，使地图版本随之变化。
++    mnBigChangeIdx++;
+ }
+ 
+ void Map::SetInertialSensor()
+diff --git a/src/MapPoint.cc b/src/MapPoint.cc
+index 1cf802c..7cd7905 100644
+--- a/src/MapPoint.cc
++++ b/src/MapPoint.cc
+@@ -1,8 +1,8 @@
+ /**
+ * This file is part of ORB-SLAM3
+ *
+-* Copyright (C) 2017-2021 Carlos Campos, Richard Elvira, Juan J. Gómez Rodríguez, José M.M. Montiel and Juan D. Tardós, University of Zaragoza.
+-* Copyright (C) 2014-2016 Raúl Mur-Artal, José M.M. Montiel and Juan D. Tardós, University of Zaragoza.
++* Copyright (C) 2017-2021 Carlos Campos, Richard Elvira, Juan J. G贸mez Rodr铆guez, Jos茅 M.M. Montiel and Juan D. Tard贸s, University of Zaragoza.
++* Copyright (C) 2014-2016 Ra煤l Mur-Artal, Jos茅 M.M. Montiel and Juan D. Tard贸s, University of Zaragoza.
+ *
+ * ORB-SLAM3 is free software: you can redistribute it and/or modify it under the terms of the GNU General Public
+ * License as published by the Free Software Foundation, either version 3 of the License, or
+@@ -368,7 +368,7 @@ void MapPoint::ComputeDistinctiveDescriptors()
+     // Compute distances between them
+     const size_t N = vDescriptors.size();
+ 
+-    float Distances[N][N];
++    vector<vector<float>> Distances(N, vector<float>(N));
+     for(size_t i=0;i<N;i++)
+     {
+         Distances[i][i]=0;
+@@ -385,7 +385,7 @@ void MapPoint::ComputeDistinctiveDescriptors()
+     int BestIdx = 0;
+     for(size_t i=0;i<N;i++)
+     {
+-        vector<int> vDists(Distances[i],Distances[i]+N);
++        vector<int> vDists(Distances[i].begin(),Distances[i].end());
+         sort(vDists.begin(),vDists.end());
+         int median = vDists[0.5*(N-1)];
+ 
+diff --git a/src/ORBmatcher.cc b/src/ORBmatcher.cc
+index 9129683..f539ea1 100644
+--- a/src/ORBmatcher.cc
++++ b/src/ORBmatcher.cc
+@@ -1,8 +1,8 @@
+ /**
+ * This file is part of ORB-SLAM3
+ *
+-* Copyright (C) 2017-2021 Carlos Campos, Richard Elvira, Juan J. Gómez Rodríguez, José M.M. Montiel and Juan D. Tardós, University of Zaragoza.
+-* Copyright (C) 2014-2016 Raúl Mur-Artal, José M.M. Montiel and Juan D. Tardós, University of Zaragoza.
++* Copyright (C) 2017-2021 Carlos Campos, Richard Elvira, Juan J. G贸mez Rodr铆guez, Jos茅 M.M. Montiel and Juan D. Tard贸s, University of Zaragoza.
++* Copyright (C) 2014-2016 Ra煤l Mur-Artal, Jos茅 M.M. Montiel and Juan D. Tard贸s, University of Zaragoza.
+ *
+ * ORB-SLAM3 is free software: you can redistribute it and/or modify it under the terms of the GNU General Public
+ * License as published by the Free Software Foundation, either version 3 of the License, or
+@@ -25,7 +25,7 @@
+ 
+ #include "Thirdparty/DBoW2/DBoW2/FeatureVector.h"
+ 
+-#include<stdint-gcc.h>
++#include<stdint.h>
+ 
+ using namespace std;
+ 
+diff --git a/src/Settings.cc b/src/Settings.cc
+index 93a50be..c1d16a7 100644
+--- a/src/Settings.cc
++++ b/src/Settings.cc
+@@ -550,7 +550,9 @@ namespace ORB_SLAM3 {
+             output << " ]" << endl;
+         }
+ 
+-        if(settings.sensor_ == System::STEREO || settings.sensor_ == System::IMU_STEREO){
++        // Rectified 模式只存储公共针孔模型，没有独立的 originalCalib2_。
++        if((settings.sensor_ == System::STEREO || settings.sensor_ == System::IMU_STEREO) &&
++           settings.cameraType_ != Settings::Rectified){
+             output << "\t-Camera 2 parameters (";
+             if(settings.cameraType_ == Settings::PinHole || settings.cameraType_ ==  Settings::Rectified){
+                 output << "Pinhole";
+diff --git a/src/System.cc b/src/System.cc
+index 60d9c51..ce37bd2 100644
+--- a/src/System.cc
++++ b/src/System.cc
+@@ -19,8 +19,11 @@
+ 
+ 
+ #include "System.h"
++#include <filesystem>
++#include <stdexcept>
+ #include "Converter.h"
+ #include <thread>
++#include <unordered_map>
+ #include <pangolin/pangolin.h>
+ #include <iomanip>
+ #include <openssl/md5.h>
+@@ -36,6 +39,11 @@
+ namespace ORB_SLAM3
+ {
+ 
++namespace {
++std::mutex recovery_check_mutex;
++std::unordered_map<Tracking*, std::function<int(const Eigen::Matrix4f&, unsigned long long)>> recovery_checks;
++}
++
+ Verbose::eLevel Verbose::th = Verbose::VERBOSITY_NORMAL;
+ 
+ System::System(const string &strVocFile, const string &strSettingsFile, const eSensor sensor,
+@@ -158,8 +166,7 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
+ 
+         if(!isRead)
+         {
+-            cout << "Error to load the file, please try with other session file or vocabulary file" << endl;
+-            exit(-1);
++            throw std::runtime_error("Cannot load Atlas or its vocabulary does not match");
+         }
+         //mpKeyFrameDatabase = new KeyFrameDatabase(*mpVocabulary);
+ 
+@@ -167,8 +174,10 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
+         //cout << "KF in DB: " << mpKeyFrameDatabase->mnNumKFs << "; words: " << mpKeyFrameDatabase->mnNumWords << endl;
+ 
+         loadedAtlas = true;
+-
+-        mpAtlas->CreateNewMap();
++        const auto maps = mpAtlas->GetAllMaps();
++        if(mSensor != STEREO || maps.size() != 1 || maps.front()->KeyFramesInMap() < 2)
++            throw std::runtime_error("Read-only localization requires one connected stereo Atlas");
++        mpAtlas->ChangeMap(maps.front());
+ 
+         //clock_t timeElapsed = clock() - start;
+         //unsigned msElapsed = timeElapsed / (CLOCKS_PER_SEC / 1000);
+@@ -190,6 +199,8 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
+     cout << "Seq. Name: " << strSequence << endl;
+     mpTracker = new Tracking(this, mpVocabulary, mpFrameDrawer, mpMapDrawer,
+                              mpAtlas, mpKeyFrameDatabase, strSettingsFile, mSensor, settings_, strSequence);
++    if(loadedAtlas)
++        mpTracker->InformOnlyTracking(true);
+ 
+     //Initialize the Local Mapping thread and launch
+     mpLocalMapper = new LocalMapping(this, mpAtlas, mSensor==MONOCULAR || mSensor==IMU_MONOCULAR,
+@@ -504,16 +515,30 @@ void System::Reset()
+ {
+     unique_lock<mutex> lock(mMutexReset);
+     mbReset = true;
++    ++mMapResetRevision;
+ }
+ 
+ void System::ResetActiveMap()
+ {
+     unique_lock<mutex> lock(mMutexReset);
+     mbResetActiveMap = true;
++    ++mMapResetRevision;
++}
++
++unsigned long long System::GetMapEpoch()
++{
++    unique_lock<mutex> lock(mMutexReset);
++    // 大范围闭环修正后，旧世界坐标中的 IMU 锚点不能与新坐标直接比较。
++    const auto mapId = static_cast<unsigned long long>(mpAtlas->GetCurrentMap()->GetId());
++    const auto change = static_cast<unsigned long long>(mpAtlas->GetLastBigChangeIdx());
++    if (mapId >= (1ULL << 24) || mMapResetRevision >= (1ULL << 20) || change >= (1ULL << 20))
++        throw std::overflow_error("VIO map epoch counter overflow");
++    return (mapId << 40) | (mMapResetRevision << 20) | change;
+ }
+ 
+ void System::Shutdown()
+ {
++    SetRecoveryCandidateCheck({});
+     {
+         unique_lock<mutex> lock(mMutexReset);
+         mbShutDown = true;
+@@ -1324,6 +1349,50 @@ int System::GetTrackingState()
+     return mTrackingState;
+ }
+ 
++void System::SetRecoveryCandidateCheck(std::function<int(const Eigen::Matrix4f&, unsigned long long)> check)
++{
++    std::lock_guard<std::mutex> lock(recovery_check_mutex);
++    if (check) recovery_checks[mpTracker] = std::move(check);
++    else recovery_checks.erase(mpTracker);
++}
++
++bool System::IsInertialScaleFinalized()
++{
++    if (!mpAtlas) return false;
++    Map* map = mpAtlas->GetCurrentMap();
++    if (!map) return false;
++    unique_lock<mutex> map_lock(map->mMutexMapUpdate);
++    // VIBA2 结束后尺度才固定为米制；此前地图坐标是纯视觉的任意尺度。
++    return map->isImuInitialized() && map->GetIniertialBA2();
++}
++
++std::function<int(const Eigen::Matrix4f&, unsigned long long)> System::GetRecoveryCandidateCheck()
++{
++    std::lock_guard<std::mutex> lock(recovery_check_mutex);
++    auto it = recovery_checks.find(mpTracker);
++    return it == recovery_checks.end() ? std::function<int(const Eigen::Matrix4f&, unsigned long long)>() : it->second;
++}
++
++bool System::GetLatestInertialBodyState(Eigen::Matrix4f& Twb, Eigen::Vector3f& velocity,
++                                        Eigen::Matrix<float,6,1>& bias, bool& ba2)
++{
++    if (!mpTracker || !mpAtlas) return false;
++    Map* map = mpAtlas->GetCurrentMap();
++    if (!map) return false;
++    unique_lock<mutex> map_lock(map->mMutexMapUpdate);
++    if (!map->isImuInitialized() || mpTracker->mState != Tracking::OK || !mpTracker->mCurrentFrame.HasPose() ||
++        !mpTracker->mCurrentFrame.HasVelocity()) return false;
++    Frame& frame = mpTracker->mCurrentFrame;
++    Twb = Eigen::Matrix4f::Identity();
++    Twb.block<3,3>(0,0) = frame.GetImuRotation();
++    Twb.block<3,1>(0,3) = frame.GetImuPosition();
++    velocity = frame.GetVelocity();
++    const IMU::Bias& b = frame.mImuBias;
++    bias << b.bax, b.bay, b.baz, b.bwx, b.bwy, b.bwz;
++    ba2 = map->GetIniertialBA2();
++    return Twb.allFinite() && velocity.allFinite() && bias.allFinite();
++}
++
+ vector<MapPoint*> System::GetTrackedMapPoints()
+ {
+     unique_lock<mutex> lock(mMutexState);
+@@ -1338,6 +1407,9 @@ vector<cv::KeyPoint> System::GetTrackedKeyPointsUn()
+ 
+ double System::GetTimeFromIMUInit()
+ {
++    // 未完成 IMU 初始化时不访问局部建图线程的当前关键帧。
++    if (!mpAtlas->isImuInitialized())
++        return 0.0;
+     double aux = mpLocalMapper->GetCurrKFTime()-mpLocalMapper->mFirstTs;
+     if ((aux>0.) && mpAtlas->isImuInitialized())
+         return mpLocalMapper->GetCurrKFTime()-mpLocalMapper->mFirstTs;
+@@ -1400,6 +1472,61 @@ void System::InsertTrackTime(double& time)
+ }
+ #endif
+ 
++
++void System::ExportMap(const string &atlasFile, const string &poseFile)
++{
++    Shutdown();
++    mptLocalMapping->join();
++    mptLoopClosing->join();
++
++    const auto maps = mpAtlas->GetAllMaps();
++    if(maps.size() != 1 || maps.front()->KeyFramesInMap() < 2)
++        throw std::runtime_error("Scan must contain one connected map with at least two keyframes");
++    Map* map = maps.front();
++
++    std::ofstream poses(std::filesystem::u8path(poseFile));
++    poses.exceptions(std::ios::failbit | std::ios::badbit);
++    poses << std::setprecision(16);
++    auto ref = mpTracker->mlpReferences.begin();
++    auto stamp = mpTracker->mlFrameTimes.begin();
++    auto lost = mpTracker->mlbLost.begin();
++    for(const auto &relative : mpTracker->mlRelativeFramePoses)
++    {
++        KeyFrame* keyframe = *ref++;
++        const double time = *stamp++;
++        const bool wasLost = *lost++;
++        if(wasLost || !keyframe)
++            continue;
++        Sophus::SE3f culledToParent;
++        while(keyframe && keyframe->isBad())
++        {
++            culledToParent = culledToParent * keyframe->mTcp;
++            keyframe = keyframe->GetParent();
++        }
++        if(!keyframe || keyframe->GetMap() != map)
++            continue;
++        const Eigen::Matrix4f pose = (relative * culledToParent * keyframe->GetPose()).inverse().matrix();
++        poses << time << ' ' << map->GetId();
++        for(int row = 0; row < 3; ++row)
++            for(int col = 0; col < 4; ++col)
++                poses << ' ' << pose(row, col);
++        poses << '\n';
++    }
++    poses.close();
++
++    mpAtlas->PreSave();
++    std::ofstream atlas(std::filesystem::u8path(atlasFile), std::ios::binary);
++    atlas.exceptions(std::ios::failbit | std::ios::badbit);
++    {
++        boost::archive::binary_oarchive archive(atlas);
++        const auto name = std::filesystem::u8path(mStrVocabularyFilePath).filename().u8string();
++        archive << name;
++        archive << CalculateCheckSum(mStrVocabularyFilePath, TEXT_FILE);
++        archive << mpAtlas;
++    }
++    atlas.close();
++}
++
+ void System::SaveAtlas(int type){
+     if(!mStrSaveAtlasToFile.empty())
+     {
+@@ -1447,9 +1574,7 @@ bool System::LoadAtlas(int type)
+     string strFileVoc, strVocChecksum;
+     bool isRead = false;
+ 
+-    string pathLoadFileName = "./";
+-    pathLoadFileName = pathLoadFileName.append(mStrLoadAtlasFromFile);
+-    pathLoadFileName = pathLoadFileName.append(".osa");
++    const auto pathLoadFileName = std::filesystem::u8path(mStrLoadAtlasFromFile + ".osa");
+ 
+     if(type == TEXT_FILE) // File text
+     {
+diff --git a/src/Tracking.cc b/src/Tracking.cc
+index 5191451..838da59 100644
+--- a/src/Tracking.cc
++++ b/src/Tracking.cc
+@@ -30,6 +30,8 @@
+ #include "GeometricTools.h"
+ 
+ #include <iostream>
++#include <cstdlib>
++#include <memory>
+ 
+ #include <mutex>
+ #include <chrono>
+@@ -39,7 +41,8 @@ using namespace std;
+ 
+ namespace ORB_SLAM3
+ {
+-
++// Maximum time allowed for same-map recovery before starting a new map.
++constexpr double kSameMapRecoveryWindowSeconds = 8.0;
+ 
+ Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer, MapDrawer *pMapDrawer, Atlas *pAtlas, KeyFrameDatabase* pKFDB, const string &strSettingPath, const int sensor, Settings* settings, const string &_nameSeq):
+     mState(NO_IMAGES_YET), mSensor(sensor), mTrackedFr(0), mbStep(false),
+@@ -76,8 +79,6 @@ Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer,
+             {
+                 std::cout << "*Error with the IMU parameters in the config file*" << std::endl;
+             }
+-
+-            mnFramesToResetIMU = mMaxFrames;
+         }
+ 
+         if(!b_parse_cam || !b_parse_orb || !b_parse_imu)
+@@ -94,6 +95,11 @@ Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer,
+         }
+     }
+ 
++    // Both settings loaders must establish the post-relocalization window.
++    const bool inertial = sensor == System::IMU_MONOCULAR ||
++        sensor == System::IMU_STEREO || sensor == System::IMU_RGBD;
++    mnFramesToResetIMU = inertial ? mMaxFrames : 0;
++
+     initID = 0; lastID = 0;
+     mbInitWith3KFs = false;
+     mnNumDataset = 0;
+@@ -1787,7 +1793,8 @@ bool Tracking::PredictStateIMU()
+ 
+ void Tracking::ResetFrameIMU()
+ {
+-    // TODO To implement...
++    // Upstream leaves this unimplemented. Do not clear preintegration in place:
++    // Frame and KeyFrame may still use it, including its accumulated covariance.
+ }
+ 
+ 
+@@ -1825,7 +1832,7 @@ void Tracking::Track()
+             CreateMapInAtlas();
+             return;
+         }
+-        else if(mCurrentFrame.mTimeStamp>mLastFrame.mTimeStamp+1.0)
++        else if(!mbOnlyTracking && mCurrentFrame.mTimeStamp>mLastFrame.mTimeStamp+1.0)
+         {
+             // cout << mCurrentFrame.mTimeStamp << ", " << mLastFrame.mTimeStamp << endl;
+             // cout << "id last: " << mLastFrame.mnId << "    id curr: " << mCurrentFrame.mnId << endl;
+@@ -1861,7 +1868,7 @@ void Tracking::Track()
+ 
+     if(mState==NO_IMAGES_YET)
+     {
+-        mState = NOT_INITIALIZED;
++        mState = mbOnlyTracking ? LOST : NOT_INITIALIZED;
+     }
+ 
+     mLastProcessedState=mState;
+@@ -1958,7 +1965,12 @@ void Tracking::Track()
+ 
+                 if (!bOK)
+                 {
+-                    if ( mCurrentFrame.mnId<=(mnLastRelocFrameId+mnFramesToResetIMU) &&
++                    if (mSensor == System::IMU_STEREO && !pCurrentMap->GetIniertialBA2())
++                    {
++                        mState = RECENTLY_LOST;
++                        mTimeStampLost = mCurrentFrame.mTimeStamp;
++                    }
++                    else if ( mCurrentFrame.mnId<=(mnLastRelocFrameId+mnFramesToResetIMU) &&
+                          (mSensor==System::IMU_MONOCULAR || mSensor==System::IMU_STEREO || mSensor == System::IMU_RGBD))
+                     {
+                         mState = LOST;
+@@ -1983,7 +1995,20 @@ void Tracking::Track()
+                     Verbose::PrintMess("Lost for a short time", Verbose::VERBOSITY_NORMAL);
+ 
+                     bOK = true;
+-                    if((mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD))
++                    if (mSensor == System::IMU_STEREO && !pCurrentMap->GetIniertialBA2())
++                    {
++                        // Stereo already provides a metric map during inertial
++                        // warm-up. Try to recover it with image matches first.
++                        constexpr double recoverySeconds = 1.0;
++                        if (mCurrentFrame.mTimeStamp - mTimeStampLost <= recoverySeconds)
++                            bOK = Relocalization();
++                        else
++                        {
++                            mState = LOST;
++                            bOK = false;
++                        }
++                    }
++                    else if((mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD))
+                     {
+                         if(pCurrentMap->isImuInitialized())
+                             PredictStateIMU();
+@@ -2013,22 +2038,39 @@ void Tracking::Track()
+                 }
+                 else if (mState == LOST)
+                 {
+-
+-                    Verbose::PrintMess("A new map is started...", Verbose::VERBOSITY_NORMAL);
+-
+-                    if (pCurrentMap->KeyFramesInMap()<10)
++                    // Keep the original map available while attempting visual
++                    // relocalization. IMU checks may be unavailable for long gaps;
++                    // the bridge reports that separately rather than claiming accuracy.
++                    const double lostDuration = mCurrentFrame.mTimeStamp - mTimeStampLost;
++                    const bool tryOriginalMap = mSensor == System::IMU_STEREO &&
++                        pCurrentMap->GetIniertialBA2() && mpSystem->GetRecoveryCandidateCheck() &&
++                        lostDuration >= 0.0 && lostDuration <= kSameMapRecoveryWindowSeconds;
++                    if (tryOriginalMap && Relocalization())
+                     {
+-                        mpSystem->ResetActiveMap();
+-                        Verbose::PrintMess("Reseting current map...", Verbose::VERBOSITY_NORMAL);
+-                    }else
+-                        CreateMapInAtlas();
+-
+-                    if(mpLastKeyFrame)
+-                        mpLastKeyFrame = static_cast<KeyFrame*>(NULL);
+-
+-                    Verbose::PrintMess("done", Verbose::VERBOSITY_NORMAL);
+-
+-                    return;
++                        bOK = true;
++                        mState = RECENTLY_LOST; // TrackLocalMap must still validate this frame.
++                        cout << "Recovered original map after tracking was lost" << endl;
++                    }
++                    else
++                    {
++                        if (tryOriginalMap)
++                        {
++                            // Advance the frame clock while waiting, otherwise the
++                            // timestamp-jump guard would create a map after one second.
++                            mLastFrame = Frame(mCurrentFrame);
++                            return;
++                        }
++                        Verbose::PrintMess("A new map is started...", Verbose::VERBOSITY_NORMAL);
++                        if (pCurrentMap->KeyFramesInMap()<10)
++                        {
++                            mpSystem->ResetActiveMap();
++                            Verbose::PrintMess("Reseting current map...", Verbose::VERBOSITY_NORMAL);
++                        } else CreateMapInAtlas();
++                        if(mpLastKeyFrame)
++                            mpLastKeyFrame = static_cast<KeyFrame*>(NULL);
++                        Verbose::PrintMess("done", Verbose::VERBOSITY_NORMAL);
++                        return;
++                    }
+                 }
+             }
+ 
+@@ -2041,6 +2083,7 @@ void Tracking::Track()
+                 if(mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)
+                     Verbose::PrintMess("IMU. State LOST", Verbose::VERBOSITY_NORMAL);
+                 bOK = Relocalization();
++                if(bOK) mbVO = false;
+             }
+             else
+             {
+@@ -2127,6 +2170,21 @@ void Tracking::Track()
+                 bOK = TrackLocalMap();
+ 
+             }
++            // In mapping mode an inertial session normally keeps predicting until
++            // LOST, then creates another map without trying place recognition.
++            // While the original map and IMU anchor are still available, try a
++            // visually supported same-map relocalization before abandoning it.
++            if (!bOK && mState == RECENTLY_LOST && mSensor == System::IMU_STEREO &&
++                pCurrentMap->GetIniertialBA2() && mpSystem->GetRecoveryCandidateCheck())
++            {
++                const Frame beforeRelocalization(mCurrentFrame);
++                if (Relocalization())
++                {
++                    bOK = TrackLocalMap();
++                    if (bOK) cout << "Recovered in original map after local tracking loss" << endl;
++                }
++                if (!bOK) mCurrentFrame = beforeRelocalization;
++            }
+             if(!bOK)
+                 cout << "Fail to track local map!" << endl;
+         }
+@@ -2139,14 +2197,20 @@ void Tracking::Track()
+                 bOK = TrackLocalMap();
+         }
+ 
+-        if(bOK)
++        if(mbOnlyTracking && mSensor == System::STEREO && pCurrentMap->IsInertial() && (!bOK || mbVO))
++        {
++            bOK = false;
++            mState = LOST;
++        }
++        else if(bOK)
+             mState = OK;
+         else if (mState == OK)
+         {
+             if (mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)
+             {
+                 Verbose::PrintMess("Track lost for less than one second...", Verbose::VERBOSITY_NORMAL);
+-                if(!pCurrentMap->isImuInitialized() || !pCurrentMap->GetIniertialBA2())
++                if(mSensor != System::IMU_STEREO &&
++                   (!pCurrentMap->isImuInitialized() || !pCurrentMap->GetIniertialBA2()))
+                 {
+                     cout << "IMU is not or recently initialized. Reseting active map..." << endl;
+                     mpSystem->ResetActiveMap();
+@@ -2163,20 +2227,7 @@ void Tracking::Track()
+             //}
+         }
+ 
+-        // Save frame if recent relocalization, since they are used for IMU reset (as we are making copy, it shluld be once mCurrFrame is completely modified)
+-        if((mCurrentFrame.mnId<(mnLastRelocFrameId+mnFramesToResetIMU)) && (mCurrentFrame.mnId > mnFramesToResetIMU) &&
+-           (mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD) && pCurrentMap->isImuInitialized())
+-        {
+-            // TODO check this situation
+-            Verbose::PrintMess("Saving pointer to frame. imu needs reset...", Verbose::VERBOSITY_NORMAL);
+-            Frame* pF = new Frame(mCurrentFrame);
+-            pF->mpPrevFrame = new Frame(mLastFrame);
+-
+-            // Load preintegration
+-            pF->mpImuPreintegratedFrame = new IMU::Preintegrated(mCurrentFrame.mpImuPreintegratedFrame);
+-        }
+-
+-        if(pCurrentMap->isImuInitialized())
++        if(mSensor != System::STEREO && pCurrentMap->isImuInitialized())
+         {
+             if(bOK)
+             {
+@@ -2268,8 +2319,17 @@ void Tracking::Track()
+         }
+ 
+         // Reset if the camera get lost soon after initialization
+-        if(mState==LOST)
++        if(mState==LOST && !mbOnlyTracking)
+         {
++            // The LOST transition occurs here before the next-frame recovery
++            // branch. Preserve the map and advance time so it can attempt recovery.
++            if (mSensor == System::IMU_STEREO && pCurrentMap->GetIniertialBA2() &&
++                mpSystem->GetRecoveryCandidateCheck() &&
++                mCurrentFrame.mTimeStamp - mTimeStampLost <= kSameMapRecoveryWindowSeconds)
++            {
++                mLastFrame = Frame(mCurrentFrame);
++                return;
++            }
+             if(pCurrentMap->KeyFramesInMap()<=10)
+             {
+                 mpSystem->ResetActiveMap();
+@@ -2859,7 +2919,8 @@ bool Tracking::TrackWithMotionModel()
+     // Create "visual odometry" points if in Localization Mode
+     UpdateLastFrame();
+ 
+-    if (mpAtlas->isImuInitialized() && (mCurrentFrame.mnId>mnLastRelocFrameId+mnFramesToResetIMU))
++    if (mSensor != System::STEREO && mpAtlas->isImuInitialized() &&
++        (mCurrentFrame.mnId>mnLastRelocFrameId+mnFramesToResetIMU))
+     {
+         // Predict state with IMU if it is initialized and it doesnt need reset
+         PredictStateIMU();
+@@ -2966,30 +3027,22 @@ bool Tracking::TrackLocalMap()
+                 aux2++;
+         }
+ 
+-    int inliers;
+-    if (!mpAtlas->isImuInitialized())
++    const bool canUseKeyFrameImu = mCurrentFrame.mpLastKeyFrame &&
++        mCurrentFrame.mpImuPreintegrated && mCurrentFrame.mpImuPreintegrated->dT > 0.0f;
++    if (!mpAtlas->isImuInitialized() ||
++        mCurrentFrame.mnId <= mnLastRelocFrameId + mnFramesToResetIMU ||
++        !canUseKeyFrameImu)
+         Optimizer::PoseOptimization(&mCurrentFrame);
++    else if (!mbMapUpdated && mCurrentFrame.mpPrevFrame &&
++             mCurrentFrame.mpPrevFrame->mpcpi &&
++             mCurrentFrame.mpImuPreintegratedFrame &&
++             mCurrentFrame.mpImuPreintegratedFrame->dT > 0.0f)
++        Optimizer::PoseInertialOptimizationLastFrame(&mCurrentFrame);
+     else
+     {
+-        if(mCurrentFrame.mnId<=mnLastRelocFrameId+mnFramesToResetIMU)
+-        {
+-            Verbose::PrintMess("TLM: PoseOptimization ", Verbose::VERBOSITY_DEBUG);
+-            Optimizer::PoseOptimization(&mCurrentFrame);
+-        }
+-        else
+-        {
+-            // if(!mbMapUpdated && mState == OK) //  && (mnMatchesInliers>30))
+-            if(!mbMapUpdated) //  && (mnMatchesInliers>30))
+-            {
+-                Verbose::PrintMess("TLM: PoseInertialOptimizationLastFrame ", Verbose::VERBOSITY_DEBUG);
+-                inliers = Optimizer::PoseInertialOptimizationLastFrame(&mCurrentFrame); // , !mpLastKeyFrame->GetMap()->GetIniertialBA1());
+-            }
+-            else
+-            {
+-                Verbose::PrintMess("TLM: PoseInertialOptimizationLastKeyFrame ", Verbose::VERBOSITY_DEBUG);
+-                inliers = Optimizer::PoseInertialOptimizationLastKeyFrame(&mCurrentFrame); // , !mpLastKeyFrame->GetMap()->GetIniertialBA1());
+-            }
+-        }
++        // The visual-only recovery window does not create an IMU prior.
++        // Rebuild it from the keyframe before resuming frame-to-frame IMU.
++        Optimizer::PoseInertialOptimizationLastKeyFrame(&mCurrentFrame);
+     }
+ 
+     aux1 = 0, aux2 = 0;
+@@ -3609,6 +3662,7 @@ void Tracking::UpdateLocalKeyFrames()
+ bool Tracking::Relocalization()
+ {
+     Verbose::PrintMess("Starting relocalization", Verbose::VERBOSITY_NORMAL);
++    const bool traceRecovery = std::getenv("EGOHAND_RELOC_TRACE") != nullptr;
+     // Compute Bag of Words Vector
+     mCurrentFrame.ComputeBoW();
+ 
+@@ -3617,6 +3671,7 @@ bool Tracking::Relocalization()
+     vector<KeyFrame*> vpCandidateKFs = mpKeyFrameDB->DetectRelocalizationCandidates(&mCurrentFrame, mpAtlas->GetCurrentMap());
+ 
+     if(vpCandidateKFs.empty()) {
++        if (traceRecovery) cout << "Recovery trace: no keyframe candidates; features=" << mCurrentFrame.N << endl;
+         Verbose::PrintMess("There are not candidates", Verbose::VERBOSITY_NORMAL);
+         return false;
+     }
+@@ -3627,8 +3682,7 @@ bool Tracking::Relocalization()
+     // If enough matches are found we setup a PnP solver
+     ORBmatcher matcher(0.75,true);
+ 
+-    vector<MLPnPsolver*> vpMLPnPsolvers;
+-    vpMLPnPsolvers.resize(nKFs);
++    vector<std::unique_ptr<MLPnPsolver>> vpMLPnPsolvers(nKFs);
+ 
+     vector<vector<MapPoint*> > vvpMapPointMatches;
+     vvpMapPointMatches.resize(nKFs);
+@@ -3637,6 +3691,7 @@ bool Tracking::Relocalization()
+     vbDiscarded.resize(nKFs);
+ 
+     int nCandidates=0;
++    int bestBowMatches=0, bestOptimizedInliers=0;
+ 
+     for(int i=0; i<nKFs; i++)
+     {
+@@ -3646,6 +3701,7 @@ bool Tracking::Relocalization()
+         else
+         {
+             int nmatches = matcher.SearchByBoW(pKF,mCurrentFrame,vvpMapPointMatches[i]);
++            bestBowMatches = std::max(bestBowMatches, nmatches);
+             if(nmatches<15)
+             {
+                 vbDiscarded[i] = true;
+@@ -3653,14 +3709,86 @@ bool Tracking::Relocalization()
+             }
+             else
+             {
+-                MLPnPsolver* pSolver = new MLPnPsolver(mCurrentFrame,vvpMapPointMatches[i]);
+-                pSolver->SetRansacParameters(0.99,10,300,6,0.5,5.991);  //This solver needs at least 6 points
+-                vpMLPnPsolvers[i] = pSolver;
++                vpMLPnPsolvers[i] = std::make_unique<MLPnPsolver>(mCurrentFrame,vvpMapPointMatches[i]);
++                vpMLPnPsolvers[i]->SetRansacParameters(0.99,10,300,6,0.5,5.991);  //This solver needs at least 6 points
+                 nCandidates++;
+             }
+         }
+     }
+ 
++    // ---- IMU consistency guard for relocalization -------------------------
++    // Relocalization is a purely visual global PnP step: it may land anywhere in
++    // the map. Once the map is metric (IMU initialized) we can reject poses that
++    // are physically impossible from the last trusted pose, the gyro-integrated
++    // body rotation and a bounded translational speed. Rejected candidates keep
++    // the system LOST instead of teleporting the camera.
++    // Tunable at runtime (environment) so the bound can be calibrated without a rebuild:
++    //   EGOHAND_RELOC_MAX_GAP_S, EGOHAND_RELOC_TRANS_BASE_M, EGOHAND_RELOC_SPEED_MPS,
++    //   EGOHAND_RELOC_ROT_BASE_DEG, EGOHAND_RELOC_ROT_RATE_DEG_S
++    auto envDouble = [](const char* name, double fallback) {
++        const char* raw = std::getenv(name);
++        if(!raw || !*raw)
++            return fallback;
++        const double value = std::atof(raw);
++        return (std::isfinite(value) && value >= 0.0) ? value : fallback;
++    };
++    const double kMaxRelocGapSec = envDouble("EGOHAND_RELOC_MAX_GAP_S", 2.0);
++    const double kRelocTransBaseM = envDouble("EGOHAND_RELOC_TRANS_BASE_M", 0.30);
++    const double kRelocSpeedMps = envDouble("EGOHAND_RELOC_SPEED_MPS", 2.0);
++    const double kRelocRotBaseDeg = envDouble("EGOHAND_RELOC_ROT_BASE_DEG", 25.0);
++    const double kRelocRotRateDegS = envDouble("EGOHAND_RELOC_ROT_RATE_DEG_S", 90.0);
++
++    const bool bInertialSensor = (mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD ||
++                                  mSensor == System::IMU_MONOCULAR);
++    bool bCanPredict = false;
++    double dRelocGap = 0.0;
++    Sophus::SE3f TwcLast;
++    Eigen::Matrix3f dRpred = Eigen::Matrix3f::Identity();
++    if(bInertialSensor && mpAtlas->GetCurrentMap()->isImuInitialized() &&
++       mLastFrame.isSet())
++    {
++        dRelocGap = mCurrentFrame.mTimeStamp - mLastFrame.mTimeStamp;
++        if(dRelocGap > 1e-4 && dRelocGap <= kMaxRelocGapSec)
++        {
++            Eigen::Matrix3f Rinc = Eigen::Matrix3f::Identity();
++            for(size_t k = 0; k + 1 < mvImuFromLastFrame.size(); ++k)
++            {
++                const IMU::Point& u0 = mvImuFromLastFrame[k];
++                const IMU::Point& u1 = mvImuFromLastFrame[k + 1];
++                const double dt = double(u1.t) - double(u0.t);
++                if(dt <= 0.0)
++                    continue;
++                const Eigen::Vector3f w = 0.5f * (u0.w + u1.w) -
++                    Eigen::Vector3f(mLastBias.bwx, mLastBias.bwy, mLastBias.bwz);
++                const float ang = w.norm() * static_cast<float>(dt);
++                if(ang > 1e-9f)
++                    Rinc = Rinc * Eigen::AngleAxisf(ang, w.normalized()).toRotationMatrix();
++            }
++            // mTcb maps body -> camera (T_cb); R_wc = R_wb * R_cb.
++            const Eigen::Matrix3f Rcb = mCurrentFrame.mImuCalib.mTcb.rotationMatrix();
++            dRpred = Rcb.transpose() * Rinc * Rcb;
++            TwcLast = mLastFrame.GetPose().inverse();
++            bCanPredict = true;
++        }
++    }
++
++    const auto recoveryCandidateCheck = mpSystem->GetRecoveryCandidateCheck();
++    auto reloc_consistent = [&](const Sophus::SE3f& TcwCandidate, double& outTrans, double& outRotDeg) -> bool
++    {
++        outTrans = 0.0; outRotDeg = 0.0;
++        if(!bCanPredict)
++            return true;
++        const Sophus::SE3f TwcCandidate = TcwCandidate.inverse();
++        outTrans = (TwcCandidate.translation() - TwcLast.translation()).norm();
++        const Eigen::Matrix3f dRobs = TwcLast.rotationMatrix().transpose() * TwcCandidate.rotationMatrix();
++        const Eigen::Matrix3f dErr = dRpred.transpose() * dRobs;
++        const float c = std::max(-1.0f, std::min(1.0f, (dErr.trace() - 1.0f) * 0.5f));
++        outRotDeg = std::acos(c) * 57.2957795;
++        const double transTol = kRelocTransBaseM + kRelocSpeedMps * dRelocGap;
++        const double rotTol = kRelocRotBaseDeg + kRelocRotRateDegS * dRelocGap;
++        return outTrans <= transTol && outRotDeg <= rotTol;
++    };
++
+     // Alternatively perform some iterations of P4P RANSAC
+     // Until we found a camera pose supported by enough inliers
+     bool bMatch = false;
+@@ -3678,7 +3806,7 @@ bool Tracking::Relocalization()
+             int nInliers;
+             bool bNoMore;
+ 
+-            MLPnPsolver* pSolver = vpMLPnPsolvers[i];
++            MLPnPsolver* pSolver = vpMLPnPsolvers[i].get();
+             Eigen::Matrix4f eigTcw;
+             bool bTcw = pSolver->iterate(5,bNoMore,vbInliers,nInliers, eigTcw);
+ 
+@@ -3712,6 +3840,7 @@ bool Tracking::Relocalization()
+                 }
+ 
+                 int nGood = Optimizer::PoseOptimization(&mCurrentFrame);
++                bestOptimizedInliers = std::max(bestOptimizedInliers, nGood);
+ 
+                 if(nGood<10)
+                     continue;
+@@ -3756,6 +3885,28 @@ bool Tracking::Relocalization()
+                 // If the pose is supported by enough inliers stop ransacs and continue
+                 if(nGood>=50)
+                 {
++                    double dRelocTrans = 0.0, dRelocRot = 0.0;
++                    int recoveryDecision = -1;
++                    if (recoveryCandidateCheck && bInertialSensor && mCurrentFrame.mImuCalib.mbIsSet)
++                    {
++                        const Sophus::SE3f TwbCandidate = mCurrentFrame.GetPose().inverse() * mCurrentFrame.mImuCalib.mTcb;
++                        recoveryDecision = recoveryCandidateCheck(TwbCandidate.matrix(), mpSystem->GetMapEpoch());
++                    }
++                    const bool rejectCandidate = recoveryCandidateCheck
++                        ? (recoveryDecision == 0)
++                        : !reloc_consistent(mCurrentFrame.GetPose(), dRelocTrans, dRelocRot);
++                    if(rejectCandidate)
++                    {
++                        vbDiscarded[i] = true;
++                        nCandidates--;
++                        if(recoveryCandidateCheck)
++                            cout << "Relocalization rejected by full-interval recovery check" << endl;
++                        else
++                            cout << "Relocalization rejected by IMU check: translation "
++                                 << dRelocTrans << " m, rotation " << dRelocRot
++                                 << " deg over " << dRelocGap << " s" << endl;
++                        continue;
++                    }
+                     bMatch = true;
+                     break;
+                 }
+@@ -3763,6 +3914,8 @@ bool Tracking::Relocalization()
+         }
+     }
+ 
++    if (traceRecovery) cout << "Recovery trace: keyframes=" << nKFs << " bow_matches=" << bestBowMatches
++                            << " pnp_inliers=" << bestOptimizedInliers << " accepted=" << bMatch << endl;
+     if(!bMatch)
+     {
+         return false;
+@@ -3817,6 +3970,17 @@ void Tracking::Reset(bool bLocMap)
+     Frame::nNextId = 0;
+     mState = NO_IMAGES_YET;
+ 
++    mbCreatedMap = false;
++    mbVelocity = false;
++    if (mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)
++    {
++        unique_lock<mutex> lock(mMutexImuQueue);
++        mlQueueImuData.clear();
++        mLastBias = IMU::Bias();
++        delete mpImuPreintegratedFromLastKF;
++        mpImuPreintegratedFromLastKF = new IMU::Preintegrated(mLastBias, *mpImuCalib);
++    }
++
+     mbReadyToInitializate = false;
+     mbSetInit=false;
+ 
+--- /dev/null
++++ b/include/windows_compat.h
+@@ -0,0 +1,11 @@
++#pragma once
++#ifdef _WIN32
++#include <chrono>
++#include <thread>
++inline int usleep(unsigned int microseconds) {
++  std::this_thread::sleep_for(std::chrono::microseconds(microseconds));
++  return 0;
++}
++#else
++#include <unistd.h>
++#endif

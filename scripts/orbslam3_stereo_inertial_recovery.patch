@@ -1,0 +1,421 @@
+﻿diff --git a/src/Frame.cc b/src/Frame.cc
+index a04c312..fa581bf 100644
+--- a/src/Frame.cc
++++ b/src/Frame.cc
+@@ -130,15 +130,16 @@ Frame::Frame(const cv::Mat &imLeft, const cv::Mat &imRight, const double &timeSt
+ #endif
+ 
+     N = mvKeys.size();
+-    if(mvKeys.empty())
+-        return;
+-
+-    UndistortKeyPoints();
++    mb = mbf / mK_(0,0);
++    // A frame with no features still participates in IMU preintegration.
++    if(N > 0)
++        UndistortKeyPoints();
+ 
+ #ifdef REGISTER_TIMES
+     std::chrono::steady_clock::time_point time_StartStereoMatches = std::chrono::steady_clock::now();
+ #endif
+-    ComputeStereoMatches();
++    if(N > 0)
++        ComputeStereoMatches();
+ #ifdef REGISTER_TIMES
+     std::chrono::steady_clock::time_point time_EndStereoMatches = std::chrono::steady_clock::now();
+ 
+@@ -171,8 +172,6 @@ Frame::Frame(const cv::Mat &imLeft, const cv::Mat &imRight, const double &timeSt
+         mbInitialComputations=false;
+     }
+ 
+-    mb = mbf/fx;
+-
+     if(pPrevF)
+     {
+         if(pPrevF->HasVelocity())
+@@ -964,6 +963,8 @@ void Frame::ComputeStereoMatches()
+         }
+     }
+ 
++    if(vDistIdx.empty())
++        return;
+     sort(vDistIdx.begin(),vDistIdx.end());
+     const float median = vDistIdx[vDistIdx.size()/2].first;
+     const float thDist = 1.5f*1.4f*median;
+diff --git a/src/LocalMapping.cc b/src/LocalMapping.cc
+index 53df332..508346f 100644
+--- a/src/LocalMapping.cc
++++ b/src/LocalMapping.cc
+@@ -35,6 +35,9 @@ LocalMapping::LocalMapping(System* pSys, Atlas *pAtlas, const float bMonocular,
+     mbAbortBA(false), mbStopped(false), mbStopRequested(false), mbNotStop(false), mbAcceptKeyFrames(true),
+     mIdxInit(0), mScale(1.0), mInitSect(0), mbNotBA1(true), mbNotBA2(true), mIdxIteration(0), infoInertial(Eigen::MatrixXd::Zero(9,9))
+ {
++    // 在首个关键帧进入局部建图线程之前，实时状态查询也可能发生。
++    mpCurrentKeyFrame = nullptr;
++    mFirstTs = 0.0;
+     mnMatchesInliers = 0;
+ 
+     mbBadImu = false;
+@@ -133,7 +136,8 @@ void LocalMapping::Run()
+ 
+                         if(dist>0.05)
+                             mTinit += mpCurrentKeyFrame->mTimeStamp - mpCurrentKeyFrame->mPrevKF->mTimeStamp;
+-                        if(!mpCurrentKeyFrame->GetMap()->GetIniertialBA2())
++                        if(mpTracker->mSensor != System::IMU_STEREO &&
++                           !mpCurrentKeyFrame->GetMap()->GetIniertialBA2())
+                         {
+                             if((mTinit<10.f) && (dist<0.02))
+                             {
+@@ -488,7 +492,8 @@ void LocalMapping::CreateNewMapPoints()
+             const cv::KeyPoint &kp1 = (mpCurrentKeyFrame -> NLeft == -1) ? mpCurrentKeyFrame->mvKeysUn[idx1]
+                                                                          : (idx1 < mpCurrentKeyFrame -> NLeft) ? mpCurrentKeyFrame -> mvKeys[idx1]
+                                                                                                                : mpCurrentKeyFrame -> mvKeysRight[idx1 - mpCurrentKeyFrame -> NLeft];
+-            const float kp1_ur=mpCurrentKeyFrame->mvuRight[idx1];
++            // 双鱼眼 mvuRight 只按左图特征分配；右图索引不可访问该数组。
++            const float kp1_ur=mpCurrentKeyFrame->mpCamera2 ? -1.0f : mpCurrentKeyFrame->mvuRight[idx1];
+             bool bStereo1 = (!mpCurrentKeyFrame->mpCamera2 && kp1_ur>=0);
+             const bool bRight1 = (mpCurrentKeyFrame -> NLeft == -1 || idx1 < mpCurrentKeyFrame -> NLeft) ? false
+                                                                                                          : true;
+@@ -497,7 +502,7 @@ void LocalMapping::CreateNewMapPoints()
+                                                             : (idx2 < pKF2 -> NLeft) ? pKF2 -> mvKeys[idx2]
+                                                                                      : pKF2 -> mvKeysRight[idx2 - pKF2 -> NLeft];
+ 
+-            const float kp2_ur = pKF2->mvuRight[idx2];
++            const float kp2_ur = pKF2->mpCamera2 ? -1.0f : pKF2->mvuRight[idx2];
+             bool bStereo2 = (!pKF2->mpCamera2 && kp2_ur>=0);
+             const bool bRight2 = (pKF2 -> NLeft == -1 || idx2 < pKF2 -> NLeft) ? false
+                                                                                : true;
+@@ -941,7 +946,9 @@ void LocalMapping::KeyFrameCulling()
+         count++;
+         KeyFrame* pKF = *vit;
+ 
+-        if((pKF->mnId==pKF->GetMap()->GetInitKFid()) || pKF->isBad())
++        // Culling needs a parent to reattach children and preserve trajectory
++        // references. Keep disconnected keyframes until they have a parent.
++        if((pKF->mnId==pKF->GetMap()->GetInitKFid()) || pKF->isBad() || !pKF->GetParent())
+             continue;
+         const vector<MapPoint*> vpMapPoints = pKF->GetMapPointMatches();
+ 
+@@ -958,6 +965,9 @@ void LocalMapping::KeyFrameCulling()
+                 {
+                     if(!mbMonocular)
+                     {
++                        // 双鱼眼深度仅对应左图特征；右图特征不参与近点关键帧剔除。
++                        if(i >= pKF->mvDepth.size())
++                            continue;
+                         if(pKF->mvDepth[i]>pKF->mThDepth || pKF->mvDepth[i]<0)
+                             continue;
+                     }
+@@ -1210,6 +1220,23 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
+     if(mpCurrentKeyFrame->mTimeStamp-mFirstTs<minTime)
+         return;
+ 
++    if (mpTracker->mSensor == System::IMU_STEREO &&
++        !mpCurrentKeyFrame->GetMap()->isImuInitialized())
++    {
++        // Keep the metric stereo map while the IMU lacks translation. Measure
++        // at the IMU origin so camera motion due to the lever arm does not
++        // count as translation during rotation about the IMU.
++        constexpr float minTranslation = 0.05f;
++        const Eigen::Vector3f origin = vpKF.front()->GetImuPosition();
++        const bool translated = std::any_of(vpKF.begin() + 1, vpKF.end(),
++            [&origin, minTranslation](KeyFrame* keyframe) {
++                return (keyframe->GetImuPosition() - origin).squaredNorm()
++                    >= minTranslation * minTranslation;
++            });
++        if (!translated)
++            return;
++    }
++
+     bInitializing = true;
+ 
+     while(CheckNewKeyFrames())
+diff --git a/src/MLPnPsolver.cpp b/src/MLPnPsolver.cpp
+index 2f8702b..1907d54 100644
+--- a/src/MLPnPsolver.cpp
++++ b/src/MLPnPsolver.cpp
+@@ -52,6 +52,8 @@
+ 
+ 
+ namespace ORB_SLAM3 {
++    MLPnPsolver::~MLPnPsolver() = default;
++
+     MLPnPsolver::MLPnPsolver(const Frame &F, const vector<MapPoint *> &vpMapPointMatches):
+             mnInliersi(0), mnIterations(0), mnBestInliers(0), N(0), mpCamera(F.mpCamera){
+         mvpMapPointMatches = vpMapPointMatches;
+diff --git a/src/Tracking.cc b/src/Tracking.cc
+index 5191451..78b5e0b 100644
+--- a/src/Tracking.cc
++++ b/src/Tracking.cc
+@@ -30,6 +30,7 @@
+ #include "GeometricTools.h"
+ 
+ #include <iostream>
++#include <memory>
+ 
+ #include <mutex>
+ #include <chrono>
+@@ -76,8 +77,6 @@ Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer,
+             {
+                 std::cout << "*Error with the IMU parameters in the config file*" << std::endl;
+             }
+-
+-            mnFramesToResetIMU = mMaxFrames;
+         }
+ 
+         if(!b_parse_cam || !b_parse_orb || !b_parse_imu)
+@@ -94,6 +93,11 @@ Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer,
+         }
+     }
+ 
++    // Both settings loaders must establish the post-relocalization window.
++    const bool inertial = sensor == System::IMU_MONOCULAR ||
++        sensor == System::IMU_STEREO || sensor == System::IMU_RGBD;
++    mnFramesToResetIMU = inertial ? mMaxFrames : 0;
++
+     initID = 0; lastID = 0;
+     mbInitWith3KFs = false;
+     mnNumDataset = 0;
+@@ -1958,7 +1962,12 @@ void Tracking::Track()
+ 
+                 if (!bOK)
+                 {
+-                    if ( mCurrentFrame.mnId<=(mnLastRelocFrameId+mnFramesToResetIMU) &&
++                    if (mSensor == System::IMU_STEREO && !pCurrentMap->GetIniertialBA2())
++                    {
++                        mState = RECENTLY_LOST;
++                        mTimeStampLost = mCurrentFrame.mTimeStamp;
++                    }
++                    else if ( mCurrentFrame.mnId<=(mnLastRelocFrameId+mnFramesToResetIMU) &&
+                          (mSensor==System::IMU_MONOCULAR || mSensor==System::IMU_STEREO || mSensor == System::IMU_RGBD))
+                     {
+                         mState = LOST;
+@@ -1983,7 +1992,20 @@ void Tracking::Track()
+                     Verbose::PrintMess("Lost for a short time", Verbose::VERBOSITY_NORMAL);
+ 
+                     bOK = true;
+-                    if((mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD))
++                    if (mSensor == System::IMU_STEREO && !pCurrentMap->GetIniertialBA2())
++                    {
++                        // Stereo already provides a metric map during inertial
++                        // warm-up. Try to recover it with image matches first.
++                        constexpr double recoverySeconds = 1.0;
++                        if (mCurrentFrame.mTimeStamp - mTimeStampLost <= recoverySeconds)
++                            bOK = Relocalization();
++                        else
++                        {
++                            mState = LOST;
++                            bOK = false;
++                        }
++                    }
++                    else if((mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD))
+                     {
+                         if(pCurrentMap->isImuInitialized())
+                             PredictStateIMU();
+@@ -2146,7 +2168,8 @@ void Tracking::Track()
+             if (mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)
+             {
+                 Verbose::PrintMess("Track lost for less than one second...", Verbose::VERBOSITY_NORMAL);
+-                if(!pCurrentMap->isImuInitialized() || !pCurrentMap->GetIniertialBA2())
++                if(mSensor != System::IMU_STEREO &&
++                   (!pCurrentMap->isImuInitialized() || !pCurrentMap->GetIniertialBA2()))
+                 {
+                     cout << "IMU is not or recently initialized. Reseting active map..." << endl;
+                     mpSystem->ResetActiveMap();
+@@ -2163,19 +2186,6 @@ void Tracking::Track()
+             //}
+         }
+ 
+-        // Save frame if recent relocalization, since they are used for IMU reset (as we are making copy, it shluld be once mCurrFrame is completely modified)
+-        if((mCurrentFrame.mnId<(mnLastRelocFrameId+mnFramesToResetIMU)) && (mCurrentFrame.mnId > mnFramesToResetIMU) &&
+-           (mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD) && pCurrentMap->isImuInitialized())
+-        {
+-            // TODO check this situation
+-            Verbose::PrintMess("Saving pointer to frame. imu needs reset...", Verbose::VERBOSITY_NORMAL);
+-            Frame* pF = new Frame(mCurrentFrame);
+-            pF->mpPrevFrame = new Frame(mLastFrame);
+-
+-            // Load preintegration
+-            pF->mpImuPreintegratedFrame = new IMU::Preintegrated(mCurrentFrame.mpImuPreintegratedFrame);
+-        }
+-
+         if(pCurrentMap->isImuInitialized())
+         {
+             if(bOK)
+@@ -2966,30 +2976,22 @@ bool Tracking::TrackLocalMap()
+                 aux2++;
+         }
+ 
+-    int inliers;
+-    if (!mpAtlas->isImuInitialized())
++    const bool canUseKeyFrameImu = mCurrentFrame.mpLastKeyFrame &&
++        mCurrentFrame.mpImuPreintegrated && mCurrentFrame.mpImuPreintegrated->dT > 0.0f;
++    if (!mpAtlas->isImuInitialized() ||
++        mCurrentFrame.mnId <= mnLastRelocFrameId + mnFramesToResetIMU ||
++        !canUseKeyFrameImu)
+         Optimizer::PoseOptimization(&mCurrentFrame);
++    else if (!mbMapUpdated && mCurrentFrame.mpPrevFrame &&
++             mCurrentFrame.mpPrevFrame->mpcpi &&
++             mCurrentFrame.mpImuPreintegratedFrame &&
++             mCurrentFrame.mpImuPreintegratedFrame->dT > 0.0f)
++        Optimizer::PoseInertialOptimizationLastFrame(&mCurrentFrame);
+     else
+     {
+-        if(mCurrentFrame.mnId<=mnLastRelocFrameId+mnFramesToResetIMU)
+-        {
+-            Verbose::PrintMess("TLM: PoseOptimization ", Verbose::VERBOSITY_DEBUG);
+-            Optimizer::PoseOptimization(&mCurrentFrame);
+-        }
+-        else
+-        {
+-            // if(!mbMapUpdated && mState == OK) //  && (mnMatchesInliers>30))
+-            if(!mbMapUpdated) //  && (mnMatchesInliers>30))
+-            {
+-                Verbose::PrintMess("TLM: PoseInertialOptimizationLastFrame ", Verbose::VERBOSITY_DEBUG);
+-                inliers = Optimizer::PoseInertialOptimizationLastFrame(&mCurrentFrame); // , !mpLastKeyFrame->GetMap()->GetIniertialBA1());
+-            }
+-            else
+-            {
+-                Verbose::PrintMess("TLM: PoseInertialOptimizationLastKeyFrame ", Verbose::VERBOSITY_DEBUG);
+-                inliers = Optimizer::PoseInertialOptimizationLastKeyFrame(&mCurrentFrame); // , !mpLastKeyFrame->GetMap()->GetIniertialBA1());
+-            }
+-        }
++        // The visual-only recovery window does not create an IMU prior.
++        // Rebuild it from the keyframe before resuming frame-to-frame IMU.
++        Optimizer::PoseInertialOptimizationLastKeyFrame(&mCurrentFrame);
+     }
+ 
+     aux1 = 0, aux2 = 0;
+@@ -3627,8 +3629,7 @@ bool Tracking::Relocalization()
+     // If enough matches are found we setup a PnP solver
+     ORBmatcher matcher(0.75,true);
+ 
+-    vector<MLPnPsolver*> vpMLPnPsolvers;
+-    vpMLPnPsolvers.resize(nKFs);
++    vector<std::unique_ptr<MLPnPsolver>> vpMLPnPsolvers(nKFs);
+ 
+     vector<vector<MapPoint*> > vvpMapPointMatches;
+     vvpMapPointMatches.resize(nKFs);
+@@ -3653,14 +3654,75 @@ bool Tracking::Relocalization()
+             }
+             else
+             {
+-                MLPnPsolver* pSolver = new MLPnPsolver(mCurrentFrame,vvpMapPointMatches[i]);
+-                pSolver->SetRansacParameters(0.99,10,300,6,0.5,5.991);  //This solver needs at least 6 points
+-                vpMLPnPsolvers[i] = pSolver;
++                vpMLPnPsolvers[i] = std::make_unique<MLPnPsolver>(mCurrentFrame,vvpMapPointMatches[i]);
++                vpMLPnPsolvers[i]->SetRansacParameters(0.99,10,300,6,0.5,5.991);  //This solver needs at least 6 points
+                 nCandidates++;
+             }
+         }
+     }
+ 
++    // ---- IMU consistency guard for relocalization -------------------------
++    // Relocalization is a purely visual global PnP step: it may land anywhere in
++    // the map. Once the map is metric (IMU initialized) we can reject poses that
++    // are physically impossible from the last trusted pose, the gyro-integrated
++    // body rotation and a bounded translational speed. Rejected candidates keep
++    // the system LOST instead of teleporting the camera.
++    constexpr double kMaxRelocGapSec = 2.0;
++    constexpr double kRelocTransBaseM = 0.30;
++    constexpr double kRelocSpeedMps = 2.0;
++    constexpr double kRelocRotBaseDeg = 25.0;
++    constexpr double kRelocRotRateDegS = 90.0;
++
++    const bool bInertialSensor = (mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD ||
++                                  mSensor == System::IMU_MONOCULAR);
++    bool bCanPredict = false;
++    double dRelocGap = 0.0;
++    Sophus::SE3f TwcLast;
++    Eigen::Matrix3f dRpred = Eigen::Matrix3f::Identity();
++    if(bInertialSensor && mpAtlas->GetCurrentMap()->isImuInitialized() &&
++       mLastFrame.isSet())
++    {
++        dRelocGap = mCurrentFrame.mTimeStamp - mLastFrame.mTimeStamp;
++        if(dRelocGap > 1e-4 && dRelocGap <= kMaxRelocGapSec)
++        {
++            Eigen::Matrix3f Rinc = Eigen::Matrix3f::Identity();
++            for(size_t k = 0; k + 1 < mvImuFromLastFrame.size(); ++k)
++            {
++                const IMU::Point& u0 = mvImuFromLastFrame[k];
++                const IMU::Point& u1 = mvImuFromLastFrame[k + 1];
++                const double dt = double(u1.t) - double(u0.t);
++                if(dt <= 0.0)
++                    continue;
++                const Eigen::Vector3f w = 0.5f * (u0.w + u1.w) -
++                    Eigen::Vector3f(mLastBias.bwx, mLastBias.bwy, mLastBias.bwz);
++                const float ang = w.norm() * static_cast<float>(dt);
++                if(ang > 1e-9f)
++                    Rinc = Rinc * Eigen::AngleAxisf(ang, w.normalized()).toRotationMatrix();
++            }
++            // mTcb maps body -> camera (T_cb); R_wc = R_wb * R_cb.
++            const Eigen::Matrix3f Rcb = mCurrentFrame.mImuCalib.mTcb.rotationMatrix();
++            dRpred = Rcb.transpose() * Rinc * Rcb;
++            TwcLast = mLastFrame.GetPose().inverse();
++            bCanPredict = true;
++        }
++    }
++
++    auto reloc_consistent = [&](const Sophus::SE3f& TcwCandidate, double& outTrans, double& outRotDeg) -> bool
++    {
++        outTrans = 0.0; outRotDeg = 0.0;
++        if(!bCanPredict)
++            return true;
++        const Sophus::SE3f TwcCandidate = TcwCandidate.inverse();
++        outTrans = (TwcCandidate.translation() - TwcLast.translation()).norm();
++        const Eigen::Matrix3f dRobs = TwcLast.rotationMatrix().transpose() * TwcCandidate.rotationMatrix();
++        const Eigen::Matrix3f dErr = dRpred.transpose() * dRobs;
++        const float c = std::max(-1.0f, std::min(1.0f, (dErr.trace() - 1.0f) * 0.5f));
++        outRotDeg = std::acos(c) * 57.2957795;
++        const double transTol = kRelocTransBaseM + kRelocSpeedMps * dRelocGap;
++        const double rotTol = kRelocRotBaseDeg + kRelocRotRateDegS * dRelocGap;
++        return outTrans <= transTol && outRotDeg <= rotTol;
++    };
++
+     // Alternatively perform some iterations of P4P RANSAC
+     // Until we found a camera pose supported by enough inliers
+     bool bMatch = false;
+@@ -3678,7 +3740,7 @@ bool Tracking::Relocalization()
+             int nInliers;
+             bool bNoMore;
+ 
+-            MLPnPsolver* pSolver = vpMLPnPsolvers[i];
++            MLPnPsolver* pSolver = vpMLPnPsolvers[i].get();
+             Eigen::Matrix4f eigTcw;
+             bool bTcw = pSolver->iterate(5,bNoMore,vbInliers,nInliers, eigTcw);
+ 
+@@ -3756,6 +3818,16 @@ bool Tracking::Relocalization()
+                 // If the pose is supported by enough inliers stop ransacs and continue
+                 if(nGood>=50)
+                 {
++                    double dRelocTrans = 0.0, dRelocRot = 0.0;
++                    if(!reloc_consistent(mCurrentFrame.GetPose(), dRelocTrans, dRelocRot))
++                    {
++                        vbDiscarded[i] = true;
++                        nCandidates--;
++                        cout << "Relocalization rejected by IMU check: translation "
++                             << dRelocTrans << " m, rotation " << dRelocRot
++                             << " deg over " << dRelocGap << " s" << endl;
++                        continue;
++                    }
+                     bMatch = true;
+                     break;
+                 }
+@@ -3817,6 +3889,17 @@ void Tracking::Reset(bool bLocMap)
+     Frame::nNextId = 0;
+     mState = NO_IMAGES_YET;
+ 
++    mbCreatedMap = false;
++    mbVelocity = false;
++    if (mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)
++    {
++        unique_lock<mutex> lock(mMutexImuQueue);
++        mlQueueImuData.clear();
++        mLastBias = IMU::Bias();
++        delete mpImuPreintegratedFromLastKF;
++        mpImuPreintegratedFromLastKF = new IMU::Preintegrated(mLastBias, *mpImuCalib);
++    }
++
+     mbReadyToInitializate = false;
+     mbSetInit=false;
+ 

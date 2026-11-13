@@ -12,6 +12,7 @@ from .reconstruction_panel import ReconstructionPanel
 from .adaptive_views import AdaptiveViews
 from ..visualization.image_view import ImageView
 from ..visualization.skeleton_view import SkeletonView
+from .shared.presentation import session_state
 
 def build_workspace(w):
     root=QWidget();root.setObjectName("applicationRoot")
@@ -36,19 +37,7 @@ def build_workspace(w):
     w.start_button=button("开始采集",w.start_pipeline,"play","primary","开始采集 / 重新处理  ·  Ctrl+Enter");w.start_button.setMinimumWidth(112)
     w.pause_button=button("",w.toggle_pause,"pause",tooltip="暂停 / 继续  ·  Space");w.pause_button.setFixedWidth(42)
     w.stop_button=button("",w.request_pipeline_stop,"stop",tooltip="停止处理");w.stop_button.setFixedWidth(42)
-    w.record_button=QToolButton();w.record_button.setText("录制")
-    w.record_button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon);w.record_button.setIcon(icon("record"));w.record_button.setProperty("icon_name","record")
-    w.record_button.setAccessibleName("开始录制");w.record_button.setCursor(Qt.PointingHandCursor)
-    w.record_button.setMinimumHeight(38);w.record_button.setFixedWidth(110)
-    record_menu=QMenu(w.record_button)
-    w.record_start_action=record_menu.addAction("开始录制",w.start_recording)
-    w.record_pause_action=record_menu.addAction("暂停录制",lambda:w.pause_recording(not w.recording_paused))
-    w.record_stop_action=record_menu.addAction("停止录制",w.stop_recording)
-    w.record_button.setMenu(record_menu);w.record_button.setPopupMode(QToolButton.MenuButtonPopup)
-    w.record_button.clicked.connect(w.toggle_recording)
-    c.addWidget(w.start_button);c.addWidget(w.pause_button);c.addWidget(w.stop_button);c.addSpacing(8);c.addWidget(w.record_button)
-    w.import_button=button("导入结果",w.open_results,"folder",tooltip="打开已保存的处理结果，不重新推理")
-    c.addWidget(w.import_button)
+    c.addWidget(w.start_button);c.addWidget(w.pause_button);c.addWidget(w.stop_button)
     w.export_button=QToolButton();w.export_button.setText("导出");w.export_button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon);w.export_button.setIcon(icon("export"));w.export_button.setProperty("icon_name","export")
     w.export_button.setAccessibleName("导出结果和截图");w.export_button.setCursor(Qt.PointingHandCursor);w.export_button.setMinimumHeight(38)
     menu=QMenu(w.export_button)
@@ -69,6 +58,9 @@ def build_workspace(w):
     w.left_view=ImageView("等待左相机图像");w.right_view=ImageView("等待右相机图像")
     w.left_card=ViewportCard("左相机","LEFT",w.left_view)
     w.right_card=ViewportCard("右相机","RIGHT",w.right_view)
+    # 状态文字不应撑大视图最小宽度；窄窗口时完整内容仍可通过提示查看。
+    for card in (w.left_card,w.right_card):
+        card.meta.setSizePolicy(QSizePolicy.Ignored,QSizePolicy.Preferred)
     for view in (w.left_view,w.right_view):
         view.setToolTip('算法预测：相同颜色和编号表示同一条已接受双目轨迹；黄色 unmatched 表示尚未配对。Left / Right 是模型手侧预测，并非配对结果。')
     cameras.addWidget(w.left_card);cameras.addWidget(w.right_card)
@@ -116,6 +108,13 @@ def build_workspace(w):
     w.joint_info.setSizePolicy(QSizePolicy.Ignored,QSizePolicy.Fixed)
     w.joint_info.setFixedHeight(28);w.joint_info.setContentsMargins(14,0,14,0)
     w.scene_card.body.addWidget(w.joint_info)
+    w.camera_pose_readout=label('相机 6D 位姿 · 等待实时 VIO')
+    w.camera_pose_readout.setWordWrap(True)
+    w.camera_pose_readout.setContentsMargins(14,3,14,6)
+    w.camera_pose_readout.setTextInteractionFlags(Qt.TextSelectableByMouse)
+    w.camera_pose_readout.setToolTip('左相机相对 VIO 世界坐标系的位姿；RPY 为固定轴 XYZ 欧拉角。位姿无效时不显示旧值。')
+    w.vio_panel.live_pose_readout.connect(w.camera_pose_readout.setText)
+    w.scene_card.body.addWidget(w.camera_pose_readout)
     views=AdaptiveViews(cameras,w.scene_card);w.adaptive_views=views
     layout_choice=QComboBox();layout_choice.addItems(["自动布局","双目在左","双目在上"])
     layout_choice.setAccessibleName("视图区布局");layout_choice.setFixedWidth(106)
@@ -207,31 +206,20 @@ def apply_theme(w,name):
     w.right_hand.title.setStyleSheet(f"color:{t['right_hand']};font-weight:600;")
 
 def sync_controls(w):
-    running=bool(w.worker and w.worker.isRunning())
-    stopping=running and w.worker.stop_event.is_set()
-    active=running and not stopping
+    status=session_state(w.worker,paused=w.paused,has_result=w.latest is not None)
+    running,stopping,active=status.running,status.stopping,status.active
     w.start_button.setText('开始回放' if w.source_panel.kind.currentIndex() in (4,5,6) else '开始采集')
     w.start_button.setEnabled(not stopping)
     w.pause_button.setEnabled(active);w.stop_button.setEnabled(active)
     pending=w.recording_pending
-    w.record_button.setEnabled(active and not pending)
-    w.record_start_action.setEnabled(active and not w.recording and not pending)
-    w.record_pause_action.setEnabled(active and w.recording and not pending)
-    w.record_stop_action.setEnabled(active and w.recording and not pending)
-    w.record_pause_action.setText("继续录制" if w.recording_paused else "暂停录制")
-    w.record_button.setText("处理中…" if pending else "已暂停" if w.recording and w.recording_paused else "录制中" if w.recording else "录制")
-    record_hint="点击继续录制" if w.recording_paused else "点击暂停录制" if w.recording else "点击开始录制"
-    w.record_button.setToolTip(record_hint+"；下拉菜单可停止录制")
-    w.record_button.setAccessibleName(record_hint)
     panel=getattr(w,"recording_panel",None)
     if panel is not None:
-        # 面板与工具栏共用录制状态；数据源未运行时不能开始录制。
+        # 数据源未运行时不能开始录制。
         panel.set_available(active)
         panel.set_state(w.recording,w.recording_paused,pending)
     w.export_button.setEnabled(w.latest is not None or bool(w.saved_results))
     w.browse_button.setEnabled(w.source_panel.kind.currentIndex() in (1,2,4,5,6))
-    state="正在停止" if stopping else "已暂停" if active and w.paused else "运行中" if active else "已停止" if w.latest else "就绪"
-    w.state_badge.setText(state)
+    w.state_badge.setText(status.text)
     w.state_badge.setProperty("tone","accent" if active and not w.paused else None)
     w.state_badge.style().unpolish(w.state_badge);w.state_badge.style().polish(w.state_badge)
 
@@ -286,5 +274,6 @@ def present_result(w,result,stats=None,frame=None):
     if frame:
         w.adaptive_views.set_image_ratio(frame.left_image.shape[1]/frame.left_image.shape[0])
         for card,img in ((w.left_card,frame.left_image),(w.right_card,frame.right_image)):
-            card.meta.setText(f"{img.shape[1]} × {img.shape[0]}  ·  "+("已校正" if frame.image_geometry=="rectified" else "原始图像"))
+            text=f"{img.shape[1]} × {img.shape[0]}  ·  "+("已校正" if frame.image_geometry=="rectified" else "原始图像")
+            card.meta.setText(text);card.meta.setToolTip(text)
     sync_controls(w)

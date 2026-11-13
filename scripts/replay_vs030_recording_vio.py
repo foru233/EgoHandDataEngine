@@ -23,6 +23,7 @@ sys.path.insert(0, str(ROOT / 'src'))
 
 from egohand.vio.live_runtime import CandidateImuBuffer, HEADER, IMU, PYTHON, _recv  # noqa: E402
 from egohand.vio.imu_lattice import LatticeImuBuffer  # noqa: E402
+from egohand.vio.pose_continuity import PoseContinuityCorrector  # noqa: E402
 from egohand.vio.vs030_geometry import prepare_vs030_vio_geometry  # noqa: E402
 
 REC = struct.Struct('<IHHIIQQQQQQ')
@@ -72,14 +73,20 @@ def replay(pairs, imu_payloads, geometry, mode, rate_hz=480.0, drift_ppm=0.0, la
         buffer = CandidateImuBuffer(camera_to_imu_lag_ns=round(lag_ms * 1e6))
     for payload in imu_payloads:
         buffer.add(payload)
-    # 录制版：数据已按到达顺序完整预载，直接从第一条样本开始按计数消费；
-    # 不按时间戳裁剪（相机/IMU 标签域可能相差数秒），也不清空。
+    # 录制版：若相机与 IMU 标签基本对齐（差 <0.5 s），裁掉首帧之前的预滚样本；
+    # 若标签域相差较大（例如 4.6 s），则按到达顺序从第一条样本开始计数消费。
+    if mode == 'lattice':
+        first_frame_ns = pairs[0][1] * 1000
+        first_sample_ns = struct.unpack_from('<Q', imu_payloads[0], 0)[0]
+        if abs(first_sample_ns - first_frame_ns) < 500_000_000:
+            buffer.trim_before(first_frame_ns)
     rect = geometry.rectifier
     maps_left, maps_right = rect.maps_left, rect.maps_right
     listener = socket.socket(); listener.bind(('127.0.0.1', 0)); listener.listen(1); listener.settimeout(30)
     env = os.environ.copy(); env['PYTHONPATH'] = str(ROOT / 'src') + os.pathsep + env.get('PYTHONPATH', '')
     log_path = ROOT / 'logs' / f'vio_recording_{mode}_{int(time.time())}.log'
-    counts = Counter(); epochs = set(); error = None; durations = []
+    counts = Counter(); epochs = set(); error = None; durations = []; positions = []
+    corrected = []; continuity = PoseContinuityCorrector()
     decoders = {4: av.CodecContext.create('hevc', 'r'), 5: av.CodecContext.create('hevc', 'r')}
     with log_path.open('w', encoding='utf8') as log:
         proc = subprocess.Popen([str(PYTHON), '-m', 'egohand.vio.live_subprocess', str(listener.getsockname()[1])],
@@ -123,6 +130,11 @@ def replay(pairs, imu_payloads, geometry, mode, rate_hz=480.0, drift_ppm=0.0, la
                 durations.append((time.perf_counter() - started) * 1000.0)
                 if response.get('type') == 'error':
                     raise RuntimeError(response.get('message'))
+                if response.get('pose_valid') and response.get('matrix'):
+                    positions.append(np.array(response['matrix'], dtype=float)[:3, 3])
+                fixed = continuity.process(response)
+                if fixed.get('pose_valid') and fixed.get('matrix'):
+                    corrected.append(np.array(fixed['matrix'], dtype=float)[:3, 3])
                 counts[response.get('tracking_state', 'UNKNOWN')] += 1
                 counts['imu_initialized'] += bool(response.get('imu_initialized'))
                 counts['pose_valid'] += bool(response.get('pose_valid'))
@@ -143,7 +155,11 @@ def replay(pairs, imu_payloads, geometry, mode, rate_hz=480.0, drift_ppm=0.0, la
               'counts': dict(counts), 'map_epochs': len(epochs), 'error': error, 'log': str(log_path),
               'frame_ms_median': round(float(_np.median(durations)), 1) if durations else None,
               'frame_ms_p90': round(float(_np.percentile(durations, 90)), 1) if durations else None,
-              'frames_replayed': len(durations)}
+              'frames_replayed': len(durations),
+              'max_position_m': round(float(np.linalg.norm(positions, axis=1).max()), 2) if positions else None,
+              'max_jump_m': round(float(max((np.linalg.norm(b - a) for a, b in zip(positions, positions[1:])), default=0.0)), 2) if positions else None,
+              'continuity_reanchors': continuity.reanchors,
+              'max_jump_after_continuity_m': round(float(max((np.linalg.norm(b - a) for a, b in zip(corrected, corrected[1:])), default=0.0)), 2) if corrected else None}
     print('REPLAY_DONE', json.dumps(result, ensure_ascii=True), flush=True)
     return result
 

@@ -2,14 +2,27 @@
 
 import csv
 import json
+from dataclasses import replace
 from pathlib import Path
 import numpy as np
 from ..core.types import serializable, result_from_dict,SCHEMA_VERSION
+from ..vio.hand_world import conservative_world_reference
+
+
+def _export_result(result):
+    """Add conservative identity semantics to new exports, including legacy input."""
+    if result.world_hands is None:
+        return result
+    if not isinstance(result.world_hands, dict):
+        raise ValueError('world_hands 必须为字典')
+    world = dict(result.world_hands)
+    world['world_reference'] = conservative_world_reference(world.get('world_reference'))
+    return replace(result, world_hands=world)
 
 # 严格JSON，非有限坐标序列化为null，新旧字段保留各自schema版本。
 def export_json(results,path):
     Path(path).parent.mkdir(parents=True,exist_ok=True)
-    Path(path).write_text(json.dumps(serializable(list(results)),ensure_ascii=False,allow_nan=False,indent=2),encoding="utf-8")
+    Path(path).write_text(json.dumps(serializable([_export_result(r) for r in results]),ensure_ascii=False,allow_nan=False,indent=2),encoding="utf-8")
 
 def load_json(path):
     return [result_from_dict(d) for d in json.loads(Path(path).read_text(encoding="utf-8"))]
@@ -65,7 +78,15 @@ def export_all(results,directory):
     export_csv(results,directory/"joints.csv")
     export_npz(results,directory/"joints.npz")
     # 世界系结果独立保存，旧相机系 CSV / NPZ 不被覆盖。
-    world=[r.world_hands for r in results if r.world_hands is not None]
+    world=[_export_result(r).world_hands for r in results if r.world_hands is not None]
     if world:
         (directory/"world_hands.json").write_text(json.dumps(serializable(world),ensure_ascii=False,allow_nan=False,indent=2),encoding="utf-8")
+        policy = {'schema_version': 1, 'cross_frame_merge_permitted': False,
+                  'reason': 'world_reference_continuity_unverified',
+                  'scope': 'world_hands.json and results.json world_hands',
+                  'consumer_action': 'Do not concatenate world coordinates across frames without independent reference-continuity evidence.'}
+        (directory/"world_reference_policy.json").write_text(json.dumps(policy,ensure_ascii=False,indent=2),encoding="utf-8")
+    if any(r.local_motion is not None or r.segment_hands is not None for r in results):
+        from .motion_export import export_local_motion
+        export_local_motion(results,directory)
     return directory

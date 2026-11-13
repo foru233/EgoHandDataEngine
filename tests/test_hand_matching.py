@@ -20,6 +20,8 @@ def test_one_missing(engine):
     assert sorted(h.valid_joint_count for h in r.hands)==[0,21]
 
 def test_all_unmatched(engine):
+    # 此用例检查启用极线约束时的错误配对拒绝。
+    engine.config['use_epipolar_error']=True
     r=run(engine,"wrong_correspondence")[0]
     assert not any(h.valid_joint_count for h in r.hands)
 

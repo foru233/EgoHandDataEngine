@@ -18,7 +18,7 @@ AXES={'horizontal':0,'vertical':1,'depth':2}
 
 
 # 左右图在不同时刻投影同一运动手；仅二维观测进入重建，XYZ参考只用于事后误差。
-def measure_case(offset_ms,speed_m_s,axis,pixel_std=1.5):
+def measure_case(offset_ms,speed_m_s,axis,pixel_std=1.5,*,config_overrides=None):
     source=SyntheticStereoSource('two_static',frames=1);source.open();source.start()
     frame=source.read();c=source.get_calibration();r=StereoRectifier(c)
     xyz=np.asarray(frame.metadata['ground_truth_xyz_m'][0]);moved=xyz.copy()
@@ -31,7 +31,7 @@ def measure_case(offset_ms,speed_m_s,axis,pixel_std=1.5):
         # receives observations in rectified pixels, never the xyz reference.
         uv=r.points(uv,'left' if side==0 else 'right')
         observations.append(HandDetection('Left',1.,uv/[c.image_width,c.image_height],uv,origin='synthetic_projection'))
-    config=default_config();config['uncertainty']={**config['uncertainty'],'assumed_pixel_std':pixel_std}
+    config=default_config();config.update(config_overrides or {});config['uncertainty']={**config['uncertainty'],'assumed_pixel_std':pixel_std}
     joints=JointTriangulator(r,config).triangulate(*observations)
     geometric=[j for j in joints if j.valid]
     engine=EgoHandEngine(config=config,calibration=c)

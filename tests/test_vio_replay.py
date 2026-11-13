@@ -6,6 +6,7 @@
   完整回放；环境缺失（Python 环境/DLL/词典/词袋/录制模块）时 pytest.skip，不用相机。
 """
 import importlib.util
+from dataclasses import replace
 import json
 import struct
 import threading
@@ -34,6 +35,7 @@ class FakeBridge:
 
     def __init__(self, log_path, **kwargs):
         self.log_path = Path(log_path)
+        self.settings_path = kwargs.get('settings_path')
         self.calls = []
         self.started = False
         self.closed = False
@@ -152,6 +154,13 @@ def _isolate_fake_instances():
 def fake_environment(monkeypatch):
     """假 SDK 模块 + 恒等几何 + 假桥，测试不依赖真实录制解码与 ORB-SLAM3。"""
     def configure(frames, imu_rows, bridge_class=FakeBridge):
+        from egohand.vio.config_snapshot import resolve_live_config, VioConfigSnapshot
+        live = resolve_live_config()
+        def fake_config(_recording, *, override=None, timing_override=None):
+            return replace(live, timing={**live.timing, 'lattice_phase_mode':'manual', 'image_scale': 1.0,
+                                        **(timing_override or {})}, source='test_fake_geometry')
+        monkeypatch.setattr(replay_runtime, 'resolve_recording_config', fake_config)
+        monkeypatch.setattr(VioConfigSnapshot, 'validate_geometry', lambda self, geometry=None: geometry)
         monkeypatch.setattr(replay_runtime, 'sdk_recording_module',
                             lambda: make_fake_sdk(frames, imu_rows))
         monkeypatch.setattr(replay_runtime, 'prepare_vs030_vio_geometry',
@@ -162,6 +171,140 @@ def fake_environment(monkeypatch):
 
 def read_jsonl(path):
     return [json.loads(line) for line in Path(path).read_text(encoding='utf8').splitlines() if line]
+
+
+def test_stereo_replay_does_not_read_or_wait_for_imu_and_delivers_matching_frame(
+        tmp_path, fake_environment, monkeypatch):
+    """No IMU archive/initialization is required for the pure stereo branch."""
+    frames = make_frames(22)
+    class VisualBridge(FakeBridge):
+        def track(self, *args):
+            result = super().track(*args)
+            result['imu_initialized'] = False
+            return result
+    fake_environment(frames, [], bridge_class=VisualBridge)
+    fake_config = replay_runtime.resolve_recording_config
+    monkeypatch.setattr(replay_runtime, 'resolve_recording_config', lambda *args, **kwargs:
+        replace(fake_config(*args, **kwargs), timing={
+            **fake_config(*args, **kwargs).timing, 'lattice_phase_mode':'session_auto'}))
+    def unexpected_imu(*_args, **_kwargs):
+        raise AssertionError('pure stereo must not initialize or read IMU')
+    from egohand.vio import session_phase
+    monkeypatch.setattr(session_phase, 'prepare_recording_phase', unexpected_imu)
+    sdk = make_fake_sdk(frames, [])
+    sdk.iter_imu_rows = unexpected_imu
+    monkeypatch.setattr(replay_runtime, 'sdk_recording_module', lambda: sdk)
+    delivered = []
+    report = ReplayVio(make_recording_dir(tmp_path), output_dir=tmp_path/'visual',
+        mode='stereo', on_frame=lambda pair, pose: delivered.append(
+            (pair.device_ts*1000, pose['timestamp_ns'], pose['pose_valid']))).run()
+    assert report['status'] == 'completed', report['error']
+    assert report['mode'] == 'stereo'
+    assert report['frames']['processed'] == len(frames)
+    assert all(not row['measurements'] for row in FakeBridge.instances[-1].calls)
+    assert all(a == b for a, b, _ in delivered)
+    assert delivered[-1][2]  # Stability gate accepts despite imu_initialized=False.
+    assert not report['imu_coverage_exhausted']
+
+
+def test_replay_rejects_unknown_sensor_mode(tmp_path):
+    with pytest.raises(ValueError, match='未知定位模式'):
+        ReplayVio(tmp_path, mode='historical_algorithm')
+
+
+def test_product_replay_continues_exact_frames_after_worker_disconnect(tmp_path,fake_environment):
+    frames=make_frames(24)
+    class DisconnectBridge(FakeBridge):
+        def track(self,*args):
+            if len(self.calls)==20:raise ConnectionResetError('native numerical abort')
+            return super().track(*args)
+    fake_environment(frames,[],bridge_class=DisconnectBridge)
+    delivered=[]
+    report=ReplayVio(make_recording_dir(tmp_path),output_dir=tmp_path/'continued',mode='stereo',
+        continue_on_localization_error=True,on_frame=lambda pair,pose:delivered.append((pair,pose))).run()
+    assert report['status']=='completed_with_localization_failure'
+    assert report['error']=='native numerical abort'
+    assert report['frames']['processed']==24 and report['frames']['localization_unavailable']==4
+    assert report['localization_failure']['frame_index']==20
+    assert len(FakeBridge.instances[-1].calls)==20 and FakeBridge.instances[-1].closed
+    assert len(delivered)==24
+    for pair,pose in delivered[20:]:
+        assert pose['timestamp_ns']==pair.device_ts*1000
+        assert pose['matrix'] is None and pose['pose_valid'] is False
+        assert pose['local_motion']['T_segment_from_camera'] is None
+        assert pose['localization_failure']['old_pose_reused'] is False
+
+
+@pytest.mark.parametrize('alignment', ['timestamp', 'lattice'])
+def test_replay_time_range_starts_fresh_and_keeps_absolute_identity(tmp_path, fake_environment, alignment):
+    frames = make_frames(12)
+    imu = make_imu_rows(BASE_NS - FRAME_STEP_NS, BASE_NS + 13 * FRAME_STEP_NS)
+    fake_environment(frames, imu)
+    start = BASE_NS + 3 * FRAME_STEP_NS
+    end = BASE_NS + 8 * FRAME_STEP_NS
+    report = ReplayVio(make_recording_dir(tmp_path), output_dir=tmp_path/'range',
+        timing={'imu_alignment': alignment, 'lattice_reference': 'count',
+                'imu_rate_hz': 480.0, 'camera_to_imu_drift_ppm': 0.0,
+                'camera_to_imu_lag_ms': 0.0},
+        start_stamp_ns=start, end_stamp_ns=end, stride=2).run()
+    assert report['status'] == 'completed', report['error']
+    calls = FakeBridge.instances[-1].calls
+    assert [c['stamp'] for c in calls] == [BASE_NS + i*FRAME_STEP_NS for i in (4, 6, 8)]
+    assert calls[0]['measurements'] == []
+    assert calls[1]['measurements']
+    assert all(calls[0]['stamp'] < row[0] <= calls[1]['stamp'] for row in calls[1]['measurements'])
+    poses = read_jsonl(report['output']['poses'])
+    assert [p['replay']['frame_index'] for p in poses] == [4, 6, 8]
+    assert report['image_range'] == {'start_stamp_ns': start, 'end_stamp_ns': end,
+        'first_processed_stamp_ns': calls[0]['stamp'], 'last_processed_stamp_ns': end,
+        'frames_before_start': 3, 'end_bound_reached': True}
+    assert report['frames']['decoded'] == report['frames']['processed'] + report['frames']['skipped']
+
+
+def test_replay_packet_range_discards_long_prefix_without_buffer_overflow(tmp_path, fake_environment, monkeypatch):
+    # A 90 second prefix exceeds the 20,000 sample packet buffer. It must not
+    # warm up the estimator, change phase, or send prefix IMU with the first frame.
+    frames = make_frames(100, step_ns=1_000_000_000)
+    fake_environment(frames, [])
+    class PacketSdk:
+        iter_paired_frames = staticmethod(lambda _root: iter(frames))
+        @staticmethod
+        def iter_imu_packets(_root):
+            for packet_index in range(3050):
+                start = BASE_NS - 1_000_000_000 + round(packet_index*16*1e9/480)
+                payload = b''.join(struct.pack('<QQ6f', start+round(i*1e9/480),
+                    start+round(i*1e9/480), 0, 0, 9.81, 0, 0, 0) for i in range(16))
+                yield SimpleNamespace(device_ts=start//1000, payload=payload)
+    monkeypatch.setattr(replay_runtime, 'sdk_recording_module', lambda: PacketSdk)
+    report = ReplayVio(make_recording_dir(tmp_path), output_dir=tmp_path/'packet_range',
+        timing={'imu_alignment': 'lattice', 'lattice_reference': 'packet',
+                'imu_rate_hz': 480., 'camera_to_imu_drift_ppm': 0., 'lattice_phase_ms': 17.},
+        start_stamp_ns=BASE_NS+90_000_000_000, max_frames=2).run()
+    assert report['status'] == 'completed', report['error']
+    calls = FakeBridge.instances[-1].calls
+    assert calls[0]['stamp'] == BASE_NS+90_000_000_000
+    assert calls[0]['measurements'] == []
+    assert len(calls[1]['measurements']) == 480
+    assert all(calls[0]['stamp'] < row[0] <= calls[1]['stamp'] for row in calls[1]['measurements'])
+    assert report['image_range']['frames_before_start'] == 90
+    assert read_jsonl(report['output']['poses'])[1]['imu_lattice']['phase_ms'] == 17.
+
+
+@pytest.mark.parametrize('bounds', [{'start_stamp_ns': -1}, {'start_stamp_ns': True},
+    {'end_stamp_ns': 2.5}, {'start_stamp_ns': 3, 'end_stamp_ns': 2}])
+def test_replay_rejects_invalid_range_before_starting_worker(tmp_path, bounds):
+    with pytest.raises(ValueError):
+        ReplayVio(tmp_path, **bounds)
+    assert not FakeBridge.instances
+
+
+def test_replay_empty_range_reports_failure_without_tracking(tmp_path, fake_environment):
+    fake_environment(make_frames(3), [])
+    report = ReplayVio(make_recording_dir(tmp_path), output_dir=tmp_path/'empty', mode='stereo',
+                      start_stamp_ns=BASE_NS+9*FRAME_STEP_NS).run()
+    assert report['status'] == 'failed'
+    assert report['frames']['processed'] == 0
+    assert not FakeBridge.instances[-1].calls
 
 
 # ---------------------------------------------------------------- 纯函数
@@ -196,6 +339,54 @@ def test_replay_rejects_missing_recording(tmp_path, monkeypatch):
     report = vio.run()
     assert report['status'] == 'failed'
     assert '录制目录不存在' in report['error']
+
+
+def test_replay_config_descriptor_is_frame_scoped_and_matches_effective_snapshot(tmp_path, fake_environment):
+    frames = make_frames(3)
+    fake_environment(frames, [])
+    delivered = []
+    def observe(pair, pose):
+        delivered.append(dict(pose['replay_config']))
+        # A consumer must not be able to relabel the next frame or run report.
+        pose['replay_config']['fingerprint'] = 'consumer-mutated'
+    report = ReplayVio(make_recording_dir(tmp_path), output_dir=tmp_path/'bound',
+                       mode='stereo', on_frame=observe).run()
+    assert report['status'] == 'completed', report['error']
+    assert len(delivered) == len(frames)
+    for config in delivered:
+        assert config == report['replay_config']
+        assert config['fingerprint'] == report['config_snapshot']['fingerprint']
+        assert config['calibration_file_sha256'] == report['config_snapshot']['hashes']['calibration']
+        assert config['camera_frame'] == 'raw_cam0_channel4'
+        assert len(config['camera_geometry_sha256']) == 64
+
+
+def test_replay_missing_config_snapshot_fails_with_persisted_report(tmp_path):
+    recording = make_recording_dir(tmp_path)
+    report = ReplayVio(recording, output_dir=tmp_path / 'out').run()
+    assert report['status'] == 'failed'
+    assert '显式指定完整配置' in report['error']
+    assert Path(report['output']['replay']).is_file()
+
+
+def test_replay_real_snapshot_selects_local_settings_and_scales_input(tmp_path, monkeypatch):
+    from egohand.vio.config_snapshot import resolve_live_config
+    recording = make_recording_dir(tmp_path)
+    live=resolve_live_config()
+    replace(live,timing={**live.timing,'lattice_phase_mode':'manual'}).write(recording)
+    frames = make_frames(1)
+    frames[0].left_bgr = np.full((1200, 1600, 3), 30, dtype=np.uint8)
+    frames[0].right_bgr = np.full((1200, 1600, 3), 60, dtype=np.uint8)
+    imu = make_imu_rows(BASE_NS - 200_000_000, BASE_NS + 200_000_000)
+    monkeypatch.setattr(replay_runtime, 'sdk_recording_module', lambda: make_fake_sdk(frames, imu))
+    monkeypatch.setattr(replay_runtime, 'ReplayBridge', FakeBridge)
+    report = ReplayVio(recording, output_dir=tmp_path / 'out').run()
+    assert report['status'] == 'completed', report['error']
+    bridge = FakeBridge.instances[-1]
+    assert bridge.settings_path == recording / 'vio_settings.yaml'
+    assert bridge.calls[0]['left_shape'] == (600, 800)
+    assert bridge.calls[0]['right_shape'] == (600, 800)
+    assert report['config_snapshot']['source'].startswith('recording:')
 
 
 # ---------------------------------------------------------------- timestamp 对齐
@@ -559,6 +750,9 @@ def _write_synthetic_recording(root, frame_count=20):
 
     root = Path(root)
     (root / 'raw').mkdir(parents=True, exist_ok=True)
+    from egohand.vio.config_snapshot import resolve_live_config
+    live=resolve_live_config()
+    replace(live,timing={**live.timing,'lattice_phase_mode':'manual'}).write(root)
     size = TEXTURE_SIZE
     left_packets = _encode_hevc_packets([_texture_frame(i, size[1], size[0])
                                          for i in range(frame_count)])
@@ -649,11 +843,15 @@ def _write_synthetic_recording(root, frame_count=20):
     }, ensure_ascii=False), encoding='utf8')
     (root / 'vio_timing.yaml').write_text(
         'imu_alignment: lattice\n'
+        'lattice_reference: count\n'
+        'image_scale: 0.5\n'
         'camera_to_imu_lag_ms: -85.0\n'
         'imu_rate_hz: 480.0\n'
         'camera_to_imu_drift_ppm: 0.0\n',
         encoding='utf8',
     )
+    # Explicit synthetic timing differs from the live snapshot copied above.
+    (root / 'vio_config_snapshot.json').unlink()
     return frame_count, len(imu_rows), len(imu_payloads)
 
 
@@ -717,3 +915,60 @@ def test_synthetic_hevc_recording_replays_through_real_bridge(tmp_path):
     assert any(message.get('type') == 'status' and '回放完成' in message.get('message', '')
                for message in statuses)
     assert report['elapsed_s'] > 0
+
+
+def test_hybrid_replay_promotes_legacy_phase_and_keeps_recording_readonly(
+        tmp_path, fake_environment, monkeypatch):
+    from egohand.vio import session_phase
+
+    frames = make_frames(26)
+    imu = make_imu_rows(BASE_NS - 200_000_000, BASE_NS + 3_000_000_000)
+    fake_environment(frames, imu)
+    recording = make_recording_dir(tmp_path)
+    original = (recording / 'raw' / 'sdk_records.bin').read_bytes()
+    observed_modes = []
+
+    def independent_phase_preflight(recording_path, config, workspace, **kwargs):
+        observed_modes.append(config.timing.get('lattice_phase_mode'))
+        if config.timing.get('lattice_phase_mode') != 'session_auto':
+            return config
+        return replace(config, timing={**config.timing,
+            'lattice_phase_ms': 34.0, 'session_phase_verified': True})
+
+    monkeypatch.setattr(session_phase, 'prepare_recording_phase', independent_phase_preflight)
+    report = ReplayVio(recording, output_dir=tmp_path/'hybrid_verified',
+                       mode='hybrid').run()
+    assert report['status'] == 'completed', report['error']
+    assert observed_modes == ['session_auto']
+    assert report['phase_verification'] == {
+        'auto_prepared': True, 'verified': True, 'effective_phase_ms': 34.0}
+    assert report['timing']['lattice_phase_ms'] == 34.0
+    assert report['frames']['processed'] == len(frames)
+    assert (recording/'raw'/'sdk_records.bin').read_bytes() == original
+    assert not (recording/'vio_session_phase.json').exists()
+
+    observed_modes.clear()
+    explicit = ReplayVio(recording, output_dir=tmp_path/'hybrid_manual',
+        timing={'lattice_phase_mode':'manual', 'lattice_phase_ms':97.0},
+        mode='hybrid').run()
+    assert explicit['status'] == 'completed', explicit['error']
+    assert observed_modes == ['manual']
+    assert explicit['phase_verification']['auto_prepared'] is False
+    assert explicit['timing']['lattice_phase_ms'] == 97.0
+
+
+def test_hybrid_unverified_recording_phase_fails_before_native_tracking(
+        tmp_path, fake_environment, monkeypatch):
+    from egohand.vio import session_phase
+    fake_environment(make_frames(10), make_imu_rows(BASE_NS, BASE_NS + 2_000_000_000))
+    recording = make_recording_dir(tmp_path)
+    def reject_unverified(_recording, config, _workspace, **_kwargs):
+        assert config.timing['lattice_phase_mode'] == 'session_auto'
+        raise ValueError('独立视觉/IMU时序没有足够证据')
+    monkeypatch.setattr(session_phase, 'prepare_recording_phase', reject_unverified)
+    report = ReplayVio(recording, output_dir=tmp_path/'unverified_hybrid',
+                       mode='hybrid').run()
+    assert report['status'] == 'failed'
+    assert '时序没有足够证据' in report['error']
+    assert FakeBridge.instances == []
+    assert not (recording / 'vio_session_phase.json').exists()

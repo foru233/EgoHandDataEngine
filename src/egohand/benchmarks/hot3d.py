@@ -74,6 +74,11 @@ def official_camera_module(root):
 
 # 先调用官方相机模型再构造公共虚拟双目，不把 FISHEYE624 直接当 OpenCV fisheye。
 class HOT3DStereoGeometry:
+    @property
+    def epipolar_axis(self):
+        """极线比较轴由内部虚拟双目校正器决定，供回放显示复用。"""
+        return self.rectifier.epipolar_axis
+
     def __init__(self,cameras,toolkit_root,width=640,height=480,focal_px=160.):
         module=official_camera_module(toolkit_root)
         self.native_json={s:cameras[s] for s in ('1201-1','1201-2')}

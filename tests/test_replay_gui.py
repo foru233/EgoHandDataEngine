@@ -14,10 +14,6 @@ def test_saved_result_images_and_seek(qtbot,source,engine,tmp_path,monkeypatch):
     w=MainWindow();qtbot.addWidget(w);w.show()
     try:
         assert [w.inspector_tabs.tabText(i) for i in range(w.inspector_tabs.count())]==["采集","录制","检测","区域","标定","坐标","诊断"]
-        qtbot.mouseClick(w.import_button,Qt.LeftButton)
-        assert w.latest.frame_id==0 and w.left_view.pix is not None and w.right_view.pix is not None
-        w.source_panel.seek_index.setValue(2);w.seek_frame()
-        assert w.latest.frame_id==2
         w.source_panel.kind.setCurrentIndex(1);w.source_panel.path.setText(str(path))
         w.source_panel.offline.setChecked(True);w.start_pipeline()
         qtbot.waitUntil(lambda:w.worker.processed==3,timeout=6000)
@@ -41,8 +37,8 @@ def test_pause_recording_events(source,tmp_path):
     assert events[0]["last_raw_submitted"]["frame_id"]==0
     assert w.writer.manifest["raw_count"]==2
 
-def test_toolbar_recording_controls(qtbot,tmp_path):
-    from PySide6.QtCore import Qt,QPoint
+def test_recording_panel_controls(qtbot,tmp_path):
+    from PySide6.QtCore import Qt
 
     w=MainWindow();qtbot.addWidget(w);w.show()
     recording_root=tmp_path/"recordings"
@@ -52,24 +48,26 @@ def test_toolbar_recording_controls(qtbot,tmp_path):
         w.source_panel.kind.setCurrentIndex(0)  # 合成源：不启动相机采集
         w.start_pipeline()
         qtbot.waitUntil(lambda:w.latest is not None,timeout=6000)
-        qtbot.mouseClick(w.record_button,Qt.LeftButton,pos=QPoint(10,w.record_button.height()//2))
+        w.inspector_tabs.setCurrentIndex(1)
+        qtbot.mouseClick(w.recording_panel.start_button,Qt.LeftButton)
         qtbot.waitUntil(lambda:w.worker.recorder is not None and w.worker.recorder.writer.manifest["raw_count"]>0,timeout=6000)
-        assert w.recording and w.record_button.isEnabled()
+        # 写盘线程可能先于 GUI 收到排队的录制状态信号。
+        qtbot.waitUntil(lambda:w.recording and not w.recording_pending,timeout=3000)
+        assert w.recording and w.recording_panel.pause_button.isEnabled()
         path=w.worker.recorder.writer.path
         assert path.parent==recording_root
         assert "录制中" in w.recording_panel.status.text()
-        assert w.record_pause_action.isEnabled() and w.record_stop_action.isEnabled()
-        w.record_pause_action.trigger()
+        assert w.recording_panel.pause_button.isEnabled() and w.recording_panel.stop_button.isEnabled()
+        qtbot.mouseClick(w.recording_panel.pause_button,Qt.LeftButton)
         qtbot.waitUntil(lambda:w.worker.recorder.paused,timeout=3000)
         qtbot.waitUntil(lambda:w.recording_panel.paused,timeout=3000)
         assert w.recording_paused and not w.paused
-        assert w.record_pause_action.text()=="继续录制"
         assert w.recording_panel.pause_button.text()=="继续"
-        qtbot.mouseClick(w.record_button,Qt.LeftButton,pos=QPoint(10,w.record_button.height()//2))
+        qtbot.mouseClick(w.recording_panel.pause_button,Qt.LeftButton)
         qtbot.waitUntil(lambda:not w.worker.recorder.paused,timeout=3000)
         qtbot.waitUntil(lambda:not w.recording_panel.paused,timeout=3000)
         assert not w.recording_paused
-        w.record_stop_action.trigger()
+        qtbot.mouseClick(w.recording_panel.stop_button,Qt.LeftButton)
         qtbot.waitUntil(lambda:w.worker.recorder is None,timeout=3000)
         # 后台写盘线程先结束；录制状态通过排队信号回到 GUI，需要等事件循环处理。
         qtbot.waitUntil(lambda:not w.recording and not w.recording_paused,timeout=3000)

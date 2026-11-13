@@ -1,6 +1,52 @@
 import struct
+from io import StringIO
 import pytest
 from egohand.vio.live_runtime import CandidateImuBuffer, LiveVio
+from egohand.vio.native_bridge import NativeVioBridge
+
+
+def test_live_queue_measures_frame_residence_instead_of_idle_consumer_wait(monkeypatch):
+    from egohand.vio import live_runtime
+    tick=[0]
+    monkeypatch.setattr(live_runtime.time,'perf_counter_ns',lambda:tick[0])
+    vio=LiveVio(object(),lambda _:None)
+    frame=object();get=vio.frames.get
+    def arrive_after_idle(*,timeout):
+        assert timeout==.1
+        tick[0]=9_000_000_000;vio.submit(frame)  # Consumer waited nine seconds for an input.
+        tick[0]=9_025_000_000
+        return get(timeout=0)
+    monkeypatch.setattr(vio.frames,'get',arrive_after_idle)
+    received,submitted,dequeued=vio._take_frame(timeout=.1)
+    assert received is frame and dequeued-submitted==25_000_000
+    assert vio.frame_queue_stats()==dict(submitted=1,deferred=0,replaced=0,dequeued=1,restart_discarded=0)
+
+
+def test_live_latest_queue_reports_replacements_and_deferred_frames():
+    vio=LiveVio(object(),lambda _:None)
+    vio.defer_imu=True;vio.submit('before-ready')
+    assert vio.frames.empty() and vio.frame_queue_stats()['deferred']==1
+    vio.ready=True
+    vio.submit('old');vio.submit('new')
+    frame,_,_=vio._take_frame(timeout=0)
+    assert frame=='new'
+    counters=vio.frame_queue_stats()
+    assert counters==dict(submitted=2,deferred=1,replaced=1,dequeued=1,restart_discarded=0)
+    counters['submitted']=1000
+    assert vio.frame_queue_stats()['submitted']==2
+
+
+def test_live_latest_queue_keeps_counter_conservation_under_concurrent_producers():
+    import threading
+    vio=LiveVio(object(),lambda _:None)
+    threads=[threading.Thread(target=lambda side=side:[vio.submit((side,i)) for i in range(100)])
+             for side in range(3)]
+    for thread in threads:thread.start()
+    for thread in threads:thread.join()
+    frame,_,_=vio._take_frame(timeout=0)
+    assert frame[1]==99 and vio.frames.empty()
+    counts=vio.frame_queue_stats()
+    assert counts['submitted']==300 and counts['replaced']==299 and counts['dequeued']==1
 
 
 def test_candidate_imu_interpolates_and_rejects_gaps():
@@ -45,3 +91,89 @@ def test_live_vio_failed_startup_unblocks_waiter_without_claiming_ready():
     vio.ready_event.set()
     assert not vio.wait_ready(timeout=0)
     assert vio.startup_error == "missing native bridge"
+
+
+def test_live_vio_worker_crash_starts_new_bounded_session(monkeypatch):
+    messages=[]
+    class Source:
+        calls=0
+        def enable_imu_capture(self, *, allow_running=False):
+            assert allow_running
+            self.calls+=1
+    source=Source()
+    vio=LiveVio(source,messages.append)
+    outcomes=iter([True,False])
+    monkeypatch.setattr(vio,'_run_session',lambda:next(outcomes))
+    monkeypatch.setattr(vio.stop_event,'wait',lambda _:False)
+    vio.frames.put('old frame')
+    vio._run()
+    assert source.calls==1 and vio.frames.empty()
+    assert vio.frame_queue_stats()['restart_discarded']==1
+    assert [m['type'] for m in messages]==['vio_reset']
+    assert '新建地图' in messages[0]['message']
+
+
+def test_live_vio_worker_restarts_are_bounded(monkeypatch):
+    messages=[]
+    class Source:
+        def enable_imu_capture(self, *, allow_running=False):pass
+    vio=LiveVio(Source(),messages.append)
+    monkeypatch.setattr(vio,'_run_session',lambda:True)
+    monkeypatch.setattr(vio.stop_event,'wait',lambda _:False)
+    vio._run()
+    assert [m['type'] for m in messages]==['vio_reset','vio_reset','error']
+
+
+def test_native_vio_cleanup_preserves_tracking_error(monkeypatch):
+    bridge = NativeVioBridge.__new__(NativeVioBridge)
+
+    def fail_cleanup():
+        raise OSError("shutdown error")
+
+    monkeypatch.setattr(bridge, "close", fail_cleanup)
+
+    with pytest.raises(OSError, match="access violation") as error:
+        with bridge:
+            raise OSError("access violation")
+    assert error.value.__notes__ == ["VIO cleanup also failed: shutdown error"]
+
+    with pytest.raises(OSError, match="shutdown error"):
+        with bridge:
+            pass
+
+
+def test_live_subprocess_reuses_one_bridge_across_sessions(monkeypatch):
+    from contextlib import nullcontext
+    from egohand.vio import live_subprocess
+
+    events = []
+
+    class Bridge:
+        def reset(self):
+            events.append("reset")
+
+    def open_bridge():
+        events.append("load")
+        return nullcontext(Bridge())
+
+    def serve(port, bridge):
+        events.append(port)
+        if port == 1234:
+            raise ConnectionAbortedError()
+
+    monkeypatch.setattr(live_subprocess.sys, "stdin", StringIO('[1234,"first"]\n[2345,"second"]\n'))
+    monkeypatch.setattr(live_subprocess, "connect", nullcontext)
+    monkeypatch.setattr(live_subprocess, "open_bridge", open_bridge)
+    monkeypatch.setattr(live_subprocess, "serve", serve)
+    live_subprocess.serve_live_sessions()
+    assert events == ["load", 1234, "reset", 2345]
+def test_vio_worker_uses_its_own_conda_runtime(tmp_path, monkeypatch):
+    from egohand.vio.live_runtime import vio_subprocess_environment
+    prefix=tmp_path/'vio-env'
+    (prefix/'conda-meta').mkdir(parents=True)
+    executable=prefix/'python.exe'
+    monkeypatch.setenv('CONDA_PREFIX','unrelated-parent-environment')
+    env=vio_subprocess_environment(executable)
+    assert env['CONDA_PREFIX']==str(prefix)
+    assert env['PATH'].split(__import__('os').pathsep)[0]==str(prefix)
+    assert __import__('os').environ['CONDA_PREFIX']=='unrelated-parent-environment'

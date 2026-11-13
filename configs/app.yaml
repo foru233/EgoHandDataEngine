@@ -3,7 +3,9 @@ processing_queue: 2 # 最大待处理帧数；实时队列满时丢最旧待处�
 recording_queue: 32 # 录制队列容量；实时过载会停止录制并标记 incomplete，不能悄悄丢原始帧。
 recording_root: recordings # GUI 录制面板的默认保存位置（相对仓库根解析）；录制停止后自动生成回放校验。
 preview_fps: 30     # GUI 创建合成源时的帧率；真实源节奏依其自身实现，不是推理FPS上限。
-vs030_rescue_crops_per_frame: 1 # VS030 全图未检出时每侧每帧补检区域数（1–4）；轮流覆盖四角，减少 CPU 占用。
+vs030_rescue_enabled: false # VS030 实时和原生录制仅做全图检测；数据集仍使用 detector.yaml 的补检设置。
+vs030_rescue_crops_per_frame: 1 # 重新开启补检时，每侧每帧轮换补检区域数（1–4）。
+vs030_recorded_rescue_crops_per_frame: 1 # 原生录制与实时一样轮换补检；4 为每帧穷尽四角，耗时更长。每帧仍做全图检测，不跳过输入帧。
 display_smoothing: # 只影响界面显示，不更改检测与重建的原始结果。
   min_cutoff_hz: 1.2 # 越低越稳定，但快速运动的视觉滞后更大。
   derivative_cutoff_hz: 1.0
@@ -14,4 +16,4 @@ display_smoothing: # 只影响界面显示，不更改检测与重建的原始�
 theme: dark        # GUI 启动主题：dark / light。
 mode: realtime     # realtime / offline；启动时初始化“离线完整处理”复选框，运行中以控件为准。
 scenario: crossing  # 启动时初始化合成场景下拉框，运行中以控件选择为准。
-source: show3d      # GUI 默认数据源：show3d / synthetic / recorded / image / vendor / hot3d。
+source: vendor      # GUI 默认数据源：VS030 相机；也可选 show3d / synthetic / recorded / image / hot3d。

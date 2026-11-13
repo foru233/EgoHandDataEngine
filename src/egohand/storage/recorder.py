@@ -127,16 +127,8 @@ class Recorder:
                 frame_index="raw/camera_frames.jsonl",
                 frame_index_note="decoded stereo bundle index; original H265 and IMU bytes remain in SDK record containers",
             )
-            root = Path(__file__).resolve().parents[3]
-            for source, name in (
-                (root / "标定结果/1/data3-camchain-imucam.yaml", "kalibr_camchain.yaml"),
-                (root / "标定结果/1/data3-results-imucam.txt", "kalibr_results.txt"),
-                (root / "configs/vio/live_timing.yaml", "vio_timing.yaml"),
-                (root / "configs/vio/live_quality.yaml", "vio_quality.yaml"),
-                (root / "configs/vio/vs030_rectified_preliminary.yaml", "vio_settings.yaml"),
-            ):
-                if source.is_file():
-                    shutil.copy2(source, self.path / name)
+            from ..vio.config_snapshot import resolve_live_config
+            resolve_live_config().write(self.path)
 
         self.frame_index = None
         if getattr(metadata, "source_type", None) == "vendor_vs030":
@@ -302,6 +294,19 @@ class Recorder:
             file_obj.write(json.dumps(serializable(event), ensure_ascii=False, allow_nan=False) + "\n")
         self.manifest["events"] = "events.jsonl"
 
+    def record_session_phase(self, model):
+        """Persist actual runtime timing separately from the immutable input snapshot."""
+        models = self.manifest.setdefault('vio_session_phase_models', [])
+        if model not in models:
+            models.append(serializable(model))
+        path = self.path / 'vio_session_phase.json'
+        temporary = path.with_suffix('.json.tmp')
+        temporary.write_text(json.dumps({'schema_version':1,'models':models},
+                                       ensure_ascii=False,allow_nan=False,indent=2),encoding='utf8')
+        temporary.replace(path)
+        self.manifest['vio_session_phase'] = path.name
+        self._manifest()
+
     def close(self, incomplete_reason=None, capture_stats=None):
         if self.closed:
             return
@@ -429,6 +434,8 @@ class AsyncRecorder:
                         self.bytes_written += len(value[-1]) + SDK_RECORD_HEADER.size
                     elif kind == "event":
                         self.writer.record_event(value)
+                    elif kind == 'session_phase':
+                        self.writer.record_session_phase(value)
                     else:
                         raise RecordingError(f"未知录制任务类型：{kind}")
                     self.written += 1

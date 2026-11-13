@@ -23,6 +23,11 @@ DEFAULT_PACKET_PHASE_MS = 97.0
 
 
 def packet_lattice_phase_ns(timing):
+    mode = timing.get('lattice_phase_mode', 'manual')
+    if mode not in ('manual', 'session_auto'):
+        raise ValueError('未知的 IMU 会话相位模式')
+    if mode == 'session_auto' and not timing.get('session_phase_verified'):
+        raise ValueError('本次录制尚未保存已确认的时序模型，不能使用默认相位建图；请先核验或显式提供配置')
     phase_ms = float(timing.get('lattice_phase_ms', DEFAULT_PACKET_PHASE_MS))
     if not math.isfinite(phase_ms) or abs(phase_ms) > 1000:
         raise ValueError('IMU 包格点相位无效')
@@ -54,6 +59,18 @@ class PacketLatticeImuBuffer:
 
     def pending(self):
         return len(self.rows)
+
+    def rephase_before_tracking(self, phase_ns):
+        """Lock startup timing once; never retime consumed inertial history."""
+        if self.consumed:
+            raise RuntimeError('Cannot rephase after IMU samples have been consumed')
+        if not math.isfinite(phase_ns) or abs(phase_ns)>1_000_000_000:
+            raise ValueError('IMU 包格点相位无效')
+        delta = int(phase_ns)-self.phase_ns
+        self.rows = deque((r[0]+delta,*r[1:]) for r in self.rows)
+        if self._last_stamp:self._last_stamp += delta
+        if self.covered_until_ns:self.covered_until_ns += delta
+        self.phase_ns = int(phase_ns)
 
     def add(self, payload, device_ts):
         records = parse_candidate_payload(payload)

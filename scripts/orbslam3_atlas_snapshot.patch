@@ -1,0 +1,207 @@
+--- a/src/System.cc
++++ b/src/System.cc
+@@ -19,6 +19,8 @@
+ 
+ 
+ #include "System.h"
++#include <filesystem>
++#include <stdexcept>
+ #include "Converter.h"
+ #include <thread>
+ #include <pangolin/pangolin.h>
+@@ -158,8 +160,7 @@
+ 
+         if(!isRead)
+         {
+-            cout << "Error to load the file, please try with other session file or vocabulary file" << endl;
+-            exit(-1);
++            throw std::runtime_error("Cannot load Atlas or its vocabulary does not match");
+         }
+         //mpKeyFrameDatabase = new KeyFrameDatabase(*mpVocabulary);
+ 
+@@ -167,8 +168,10 @@
+         //cout << "KF in DB: " << mpKeyFrameDatabase->mnNumKFs << "; words: " << mpKeyFrameDatabase->mnNumWords << endl;
+ 
+         loadedAtlas = true;
+-
+-        mpAtlas->CreateNewMap();
++        const auto maps = mpAtlas->GetAllMaps();
++        if(mSensor != STEREO || maps.size() != 1 || maps.front()->KeyFramesInMap() < 2)
++            throw std::runtime_error("Read-only localization requires one connected stereo Atlas");
++        mpAtlas->ChangeMap(maps.front());
+ 
+         //clock_t timeElapsed = clock() - start;
+         //unsigned msElapsed = timeElapsed / (CLOCKS_PER_SEC / 1000);
+@@ -190,6 +193,8 @@
+     cout << "Seq. Name: " << strSequence << endl;
+     mpTracker = new Tracking(this, mpVocabulary, mpFrameDrawer, mpMapDrawer,
+                              mpAtlas, mpKeyFrameDatabase, strSettingsFile, mSensor, settings_, strSequence);
++    if(loadedAtlas)
++        mpTracker->InformOnlyTracking(true);
+ 
+     //Initialize the Local Mapping thread and launch
+     mpLocalMapper = new LocalMapping(this, mpAtlas, mSensor==MONOCULAR || mSensor==IMU_MONOCULAR,
+@@ -1411,6 +1416,61 @@
+ }
+ #endif
+ 
++
++void System::ExportMap(const string &atlasFile, const string &poseFile)
++{
++    Shutdown();
++    mptLocalMapping->join();
++    mptLoopClosing->join();
++
++    const auto maps = mpAtlas->GetAllMaps();
++    if(maps.size() != 1 || maps.front()->KeyFramesInMap() < 2)
++        throw std::runtime_error("Scan must contain one connected map with at least two keyframes");
++    Map* map = maps.front();
++
++    std::ofstream poses(std::filesystem::u8path(poseFile));
++    poses.exceptions(std::ios::failbit | std::ios::badbit);
++    poses << std::setprecision(16);
++    auto ref = mpTracker->mlpReferences.begin();
++    auto stamp = mpTracker->mlFrameTimes.begin();
++    auto lost = mpTracker->mlbLost.begin();
++    for(const auto &relative : mpTracker->mlRelativeFramePoses)
++    {
++        KeyFrame* keyframe = *ref++;
++        const double time = *stamp++;
++        const bool wasLost = *lost++;
++        if(wasLost || !keyframe)
++            continue;
++        Sophus::SE3f culledToParent;
++        while(keyframe && keyframe->isBad())
++        {
++            culledToParent = culledToParent * keyframe->mTcp;
++            keyframe = keyframe->GetParent();
++        }
++        if(!keyframe || keyframe->GetMap() != map)
++            continue;
++        const Eigen::Matrix4f pose = (relative * culledToParent * keyframe->GetPose()).inverse().matrix();
++        poses << time << ' ' << map->GetId();
++        for(int row = 0; row < 3; ++row)
++            for(int col = 0; col < 4; ++col)
++                poses << ' ' << pose(row, col);
++        poses << '\n';
++    }
++    poses.close();
++
++    mpAtlas->PreSave();
++    std::ofstream atlas(std::filesystem::u8path(atlasFile), std::ios::binary);
++    atlas.exceptions(std::ios::failbit | std::ios::badbit);
++    {
++        boost::archive::binary_oarchive archive(atlas);
++        const auto name = std::filesystem::u8path(mStrVocabularyFilePath).filename().u8string();
++        archive << name;
++        archive << CalculateCheckSum(mStrVocabularyFilePath, TEXT_FILE);
++        archive << mpAtlas;
++    }
++    atlas.close();
++}
++
+ void System::SaveAtlas(int type){
+     if(!mStrSaveAtlasToFile.empty())
+     {
+@@ -1458,9 +1518,7 @@
+     string strFileVoc, strVocChecksum;
+     bool isRead = false;
+ 
+-    string pathLoadFileName = "./";
+-    pathLoadFileName = pathLoadFileName.append(mStrLoadAtlasFromFile);
+-    pathLoadFileName = pathLoadFileName.append(".osa");
++    const auto pathLoadFileName = std::filesystem::u8path(mStrLoadAtlasFromFile + ".osa");
+ 
+     if(type == TEXT_FILE) // File text
+     {
+--- a/include/System.h
++++ b/include/System.h
+@@ -140,6 +140,7 @@
+     // It waits until all threads have finished.
+     // This function must be called before saving the trajectory.
+     void Shutdown();
++    void ExportMap(const string &atlasFile, const string &poseFile);
+     bool isShutDown();
+ 
+     // Save camera trajectory in the TUM RGB-D dataset format.
+--- a/src/Tracking.cc
++++ b/src/Tracking.cc
+@@ -1830,7 +1830,7 @@
+             CreateMapInAtlas();
+             return;
+         }
+-        else if(mCurrentFrame.mTimeStamp>mLastFrame.mTimeStamp+1.0)
++        else if(!mbOnlyTracking && mCurrentFrame.mTimeStamp>mLastFrame.mTimeStamp+1.0)
+         {
+             // cout << mCurrentFrame.mTimeStamp << ", " << mLastFrame.mTimeStamp << endl;
+             // cout << "id last: " << mLastFrame.mnId << "    id curr: " << mCurrentFrame.mnId << endl;
+@@ -1866,7 +1866,7 @@
+ 
+     if(mState==NO_IMAGES_YET)
+     {
+-        mState = NOT_INITIALIZED;
++        mState = mbOnlyTracking ? LOST : NOT_INITIALIZED;
+     }
+ 
+     mLastProcessedState=mState;
+@@ -2064,6 +2064,7 @@
+                 if(mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)
+                     Verbose::PrintMess("IMU. State LOST", Verbose::VERBOSITY_NORMAL);
+                 bOK = Relocalization();
++                if(bOK) mbVO = false;
+             }
+             else
+             {
+@@ -2162,7 +2163,12 @@
+                 bOK = TrackLocalMap();
+         }
+ 
+-        if(bOK)
++        if(mbOnlyTracking && mSensor == System::STEREO && pCurrentMap->IsInertial() && (!bOK || mbVO))
++        {
++            bOK = false;
++            mState = LOST;
++        }
++        else if(bOK)
+             mState = OK;
+         else if (mState == OK)
+         {
+@@ -2187,7 +2193,7 @@
+             //}
+         }
+ 
+-        if(pCurrentMap->isImuInitialized())
++        if(mSensor != System::STEREO && pCurrentMap->isImuInitialized())
+         {
+             if(bOK)
+             {
+@@ -2279,7 +2285,7 @@
+         }
+ 
+         // Reset if the camera get lost soon after initialization
+-        if(mState==LOST)
++        if(mState==LOST && !mbOnlyTracking)
+         {
+             if(pCurrentMap->KeyFramesInMap()<=10)
+             {
+@@ -2870,7 +2876,8 @@
+     // Create "visual odometry" points if in Localization Mode
+     UpdateLastFrame();
+ 
+-    if (mpAtlas->isImuInitialized() && (mCurrentFrame.mnId>mnLastRelocFrameId+mnFramesToResetIMU))
++    if (mSensor != System::STEREO && mpAtlas->isImuInitialized() &&
++        (mCurrentFrame.mnId>mnLastRelocFrameId+mnFramesToResetIMU))
+     {
+         // Predict state with IMU if it is initialized and it doesnt need reset
+         PredictStateIMU();
+--- a/src/LoopClosing.cc
++++ b/src/LoopClosing.cc
+@@ -98,7 +98,7 @@
+         //----------------------------
+ 
+ 
+-        if(CheckNewKeyFrames())
++        if(mbActiveLC && CheckNewKeyFrames())
+         {
+             if(mpLastCurrentKF)
+             {

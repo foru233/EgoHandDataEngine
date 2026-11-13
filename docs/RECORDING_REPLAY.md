@@ -100,6 +100,7 @@ session_YYYYmmdd_HHMMSS_<ns>/
 - `--lag-ms`：仅 `timestamp` 语义下有意义（相机时间 = IMU 时间 − lag）；`lattice` 下保留在报告里便于对照。
 - `--stride N`：每 N 帧送一帧给 ORB（lattice 下会按跳过的时长补偿相位），用于快速参数扫。
 - `--max-frames N`：只回放前 N 帧（冒烟验证）。
+- `--start-stamp-ns NS` / `--end-stamp-ns NS`：按相机绝对纳秒时间选闭区间（录制 `device_ts × 1000`，可从已有 `poses.jsonl` 取 `timestamp_ns`）。估计器从区间内首个选中帧重新开始，该帧不带 IMU；此前帧仅用于顺序解码和推进传感器缓冲。保留原时间戳、录制帧索引及整段录制的 stride 基准。`replay.json.image_range` 记录请求边界、实际首末处理时间及起点前跳过帧数。空区间报告失败。区间选择用于诊断，不应按输出结果倒选起点宣称精度改善。
 - `--output DIR`：默认 `<recording>/replay_vio/replay_<unixns>/`。
 
 输出：
@@ -114,7 +115,7 @@ replay_<unixns>/
                  #   map_epochs、reset_events{system_reset,motion_insufficient,map_epoch_changes}、imu、elapsed_s、error、output
 ```
 
-回放是确定性的：按录制顺序逐帧送桥、不丢帧；相同输入与相同 timing 参数得到相同序列（实时链路 `frames` 队列 `maxsize=1` 会丢帧，这一点回放与实时不同，报告中已声明 `stride`/`max_frames`）。回放复用 `egohand-vio` 独立进程与 `egohand_vio_bridge.dll`，本机路径由 `egohand.vio.live_runtime.PYTHON` 提供。
+回放按录制顺序逐帧送桥；显式 stride、时间范围、帧数上限和 IMU 覆盖不足会影响处理范围。输入顺序可复现，ORB-SLAM3 的并发调度仍可能造成轨迹和初始化结果差异，不能保证逐字节确定性。实时链路 `frames` 队列 `maxsize=1` 会丢帧，这一点与离线回放不同。回放使用 `egohand-vio` 独立进程，DLL 由显式实验路径或角色清单选择，Python 路径由 `egohand.vio.live_runtime.PYTHON` 提供。
 
 ## 7. 实测验证（2026-11-10，VS030 实机）
 

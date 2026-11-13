@@ -27,8 +27,8 @@ weights:
 
 # ── 2. 几何有效性：像素误差、深度与同步 ──
 # 以下像素阈值针对校正后的左右关键点；增大通常保留更多点，也可能放过错配。
-use_epipolar_error: true  # 是否将极线误差用于关节拒绝、匹配代价和几何质量分；仍会计算并显示误差。
-use_reprojection_error: true # 关闭时仍计算误差，但不以重投影误差拒绝或计入质量分。
+use_epipolar_error: false # 默认不按极线误差拒绝；仍会计算并显示误差。
+use_reprojection_error: false # 默认不按重投影误差拒绝；仍会计算并显示误差。
 vs030_user_confirmed_sync: true # 用户已确认设备同步；按同一完整数据包组配对，不伪造曝光时间戳。
 enable_3d_tracking: true # 三维跨帧身份跟踪；关闭后逐帧重建，不沿用历史 ID。
 max_epipolar_px: 3.0      # 最大极线误差，px；水平双目比较纵坐标，垂直双目比较横坐标。
