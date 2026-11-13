@@ -186,9 +186,10 @@ class DepthTask(QThread):
 
     completed=Signal(int,object,str)
 
-    def __init__(self,generation,frame,calibration,cache,parent=None):
+    def __init__(self,generation,frame,calibration,cache,parent=None,*,near_m=.15,far_m=3.,filter_range=True):
         super().__init__(parent)
         self.generation=generation;self.frame=frame;self.calibration=calibration;self.cache=cache
+        self.near_m=float(near_m);self.far_m=float(far_m);self.filter_range=bool(filter_range)
 
     def run(self):
         try:
@@ -200,24 +201,35 @@ class DepthTask(QThread):
                     for i in (f.left_image,f.right_image)]
             if vertical:images=[np.ascontiguousarray(i.T) for i in images]
             if swapped:images=images[::-1]
-            depth=depth_engine.estimate(*images)
+            depth=depth_engine.estimate(*images,min_depth_m=0.01,max_depth_m=float('inf'))
             if vertical:depth=depth.T
-            valid=depth>0
-            color=cv2.applyColorMap(np.uint8(np.clip((4-depth)/3.75,0,1)*255),cv2.COLORMAP_TURBO)
+            color,valid=colorize_depth(depth,self.near_m,self.far_m,self.filter_range)
             color[~valid]=0
             ms=(time.perf_counter()-started)*1000
             text=(f'深度 · '+('右目参考' if swapped else '左目参考')+
-                  f' · 0.25–4 m · 有效 {valid.mean():.0%} · {ms:.0f} ms')
+                  f' · {self.near_m:g}–{self.far_m:g} m'+(' · 范围内' if self.filter_range else ' · 全部有效值')+
+                  f' · 有效 {valid.mean():.0%} · {ms:.0f} ms')
             self.completed.emit(self.generation,color,text)
         except Exception as exc:
             self.completed.emit(self.generation,None,'深度暂不可用：'+str(exc))
+
+
+def colorize_depth(depth,near_m,far_m,filter_range=True):
+    """Colorize display data; all-values mode saturates outside the color scale."""
+    if not 0 < near_m < far_m:raise ValueError('深度范围的近端必须小于远端')
+    valid=np.isfinite(depth)&(depth>0)
+    if filter_range:valid &= (depth>=near_m)&(depth<=far_m)
+    scaled=np.nan_to_num((far_m-depth)/(far_m-near_m),nan=0.,posinf=0.,neginf=0.)
+    color=cv2.applyColorMap(np.uint8(np.clip(scaled,0,1)*255),cv2.COLORMAP_TURBO)
+    color[~valid]=0
+    return color,valid
 
 
 class DepthCache:
     """按标定复用校正器与 SGBM 匹配器，避免每次刷新重建映射表。"""
 
     # 与 StereoDepth.estimate 的有效门限一致的近端距离，用来反推需要的视差搜索宽度。
-    NEAR_M=.25
+    NEAR_M=.10
 
     def __init__(self):
         self._key=None;self._rectifier=None;self._depth=None
@@ -232,7 +244,7 @@ class DepthCache:
 
     @staticmethod
     def required_disparities(fx, baseline, near_m=NEAR_M):
-        """0.25 m 处需要的视差宽度；SGBM 要求是 16 的倍数。"""
+        """近端处需要的视差宽度；SGBM 要求是 16 的倍数。"""
         import math
         needed=fx*baseline/near_m
         return int(min(96,max(16,16*math.ceil(needed/16))))

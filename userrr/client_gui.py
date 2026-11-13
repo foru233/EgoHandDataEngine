@@ -7,7 +7,7 @@ import numpy as np
 import yaml
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,
-    QComboBox,QFileDialog,QSlider,QSizePolicy,QBoxLayout,QToolButton)
+    QAbstractSpinBox,QComboBox,QDoubleSpinBox,QCheckBox,QFileDialog,QSlider,QSizePolicy,QBoxLayout,QToolButton)
 from egohand.core.pipeline import ROOT
 from egohand.gui.shared.session import SessionController
 from egohand.gui.shared.sources import SourceRequest,create_source
@@ -171,9 +171,31 @@ class ClientMainWindow(QMainWindow):
         self.raw_left_tile.set_caption('原始 · 左')
         self.raw_right_tile.set_caption('原始 · 右')
         self.depth_tile=ImageTile('等待双目深度');self.depth_view=self.depth_tile.view
-        self.depth_tile.set_caption('深度 · 0.25–4 m')
-        for tile in (self.raw_left_tile,self.raw_right_tile,self.depth_tile):box.addWidget(tile,1)
+        self.depth_tile.set_caption('深度 · 0.15–3 m · 范围内')
+        box.addWidget(self.raw_left_tile,1);box.addWidget(self.raw_right_tile,1)
+        controls=QHBoxLayout();controls.setContentsMargins(2,1,2,1);controls.setSpacing(3)
+        controls.addWidget(QLabel('深度 m'))
+        self.depth_near=QDoubleSpinBox();self.depth_near.setAccessibleName('深度显示近端米')
+        self.depth_near.setRange(.10,9.99);self.depth_near.setDecimals(2);self.depth_near.setSingleStep(.05);self.depth_near.setValue(.15)
+        self.depth_far=QDoubleSpinBox();self.depth_far.setAccessibleName('深度显示远端米')
+        self.depth_far.setRange(.11,10.);self.depth_far.setDecimals(2);self.depth_far.setSingleStep(.1);self.depth_far.setValue(3.)
+        for spin in (self.depth_near,self.depth_far):
+            spin.setButtonSymbols(QAbstractSpinBox.NoButtons);spin.setMinimumWidth(52);spin.setMaximumWidth(65)
+        self.depth_filter=QCheckBox('仅范围内');self.depth_filter.setAccessibleName('仅显示深度范围内的有效值');self.depth_filter.setChecked(True)
+        self.depth_filter.setToolTip('取消勾选显示全部匹配有效值；范围外颜色按近端或远端饱和。仅影响深度图。')
+        for widget in (self.depth_near,QLabel('–'),self.depth_far,self.depth_filter):controls.addWidget(widget)
+        box.addLayout(controls);box.addWidget(self.depth_tile,1)
+        self.depth_near.valueChanged.connect(self._depth_range_changed)
+        self.depth_far.valueChanged.connect(self._depth_range_changed)
+        self.depth_filter.toggled.connect(self._depth_range_changed)
         return column
+
+    def _depth_range_changed(self,*_):
+        self.depth_near.setMaximum(self.depth_far.value()-.01)
+        self.depth_far.setMinimum(self.depth_near.value()+.01)
+        self.generation+=1
+        self.depth_at=0
+        self.depth_tile.set_caption('深度设置已更改 · 等待下一帧')
 
     def _right_column(self):
         """右列（大）：校正后的左右图及其手部识别结果。"""
@@ -460,7 +482,9 @@ class ClientMainWindow(QMainWindow):
                 c=getattr(self,'calibration',None)
                 if c:
                     if self.depth_task:self.depth_task.deleteLater()
-                    self.depth_task=DepthTask(self.generation,frame,c,self.depth_cache,self)
+                    self.depth_task=DepthTask(self.generation,frame,c,self.depth_cache,self,
+                        near_m=self.depth_near.value(),far_m=self.depth_far.value(),
+                        filter_range=self.depth_filter.isChecked())
                     self.depth_task.completed.connect(self.on_depth);self.depth_task.start()
                 else:self.depth_tile.set_caption('缺少有效双目标定，深度未启用')
         elif self.last_frame_at and time.monotonic()-self.last_frame_at>2 and self.session.worker and self.session.worker.isRunning():

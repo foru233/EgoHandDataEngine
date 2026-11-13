@@ -19,7 +19,7 @@ class StereoDepth:
             P1=200, P2=800, uniquenessRatio=12, speckleWindowSize=60, speckleRange=2,
         )
 
-    def estimate(self, left, right):
+    def estimate(self, left, right, *, min_depth_m=.25, max_depth_m=4.):
         disparity = self.matcher.compute(left, right).astype(np.float32) / 16
         reverse = self.matcher.compute(np.fliplr(right), np.fliplr(left))[:, ::-1] / 16
         y, x = np.indices(left.shape)
@@ -27,7 +27,7 @@ class StereoDepth:
         depth = np.divide(self.fx * self.baseline_m, disparity, out=np.zeros_like(disparity),
                           where=disparity > 0)
         matched = reverse[y, np.clip(rx, 0, left.shape[1] - 1)]
-        valid = (rx >= 0) & (np.abs(matched - disparity) <= .75) & (depth >= .25) & (depth <= 4)
+        valid = (rx >= 0) & (np.abs(matched - disparity) <= .75) & (depth >= min_depth_m) & (depth <= max_depth_m)
         return np.where(valid, depth, 0)
 
     def unproject(self, x, y, z):

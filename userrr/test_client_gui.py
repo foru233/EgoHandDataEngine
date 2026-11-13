@@ -1,5 +1,6 @@
 """Delivery lifecycle regression; run with tests/conftest.py loaded via tests directory."""
 import sys
+import pytest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from client_gui import ClientMainWindow
@@ -126,12 +127,12 @@ def test_depth_display_search_window_covers_near_limit():
     """显示深度的搜索窗口按 0.25 m 实际所需反推，且必须是 16 的倍数。"""
     from delivery_views import DepthCache
     # fx=89.25 px、baseline=65.55 mm：0.25 m 需要 23.4 px，向上取到 16 的倍数 32。
-    assert DepthCache.required_disparities(89.25, 0.06555) == 32
+    assert DepthCache.required_disparities(89.25, 0.06555, .25) == 32
     for fx in (10.0, 44.6, 89.25, 198.7885, 1000.0):
         window = DepthCache.required_disparities(fx, 0.06555)
         assert window % 16 == 0
         assert 16 <= window <= 96
-        ideal = fx * 0.06555 / 0.25
+        ideal = fx * 0.06555 / 0.10
         if ideal <= 96:
             # 窗口必须覆盖 0.25 m 处的视差，否则近端会被静默截断。
             assert window >= ideal
@@ -140,6 +141,38 @@ def test_depth_display_search_window_covers_near_limit():
             assert window == 96
     assert DepthCache.required_disparities(10.0, 0.06555) == 16
     assert DepthCache.required_disparities(1000.0, 0.06555) == 96
+
+
+def test_depth_range_controls_only_display_and_filter_valid_values(qtbot):
+    import numpy as np
+    from delivery_views import colorize_depth
+    values=np.array([[0.,.12,.15,1.,3.,4.,np.nan]],dtype=np.float32)
+    color,mask=colorize_depth(values,.15,3.,True)
+    assert mask.tolist()==[[False,False,True,True,True,False,False]]
+    assert not color[0,1].any() and color[0,2].any()
+    _,all_mask=colorize_depth(values,.15,3.,False)
+    assert all_mask.tolist()==[[False,True,True,True,True,True,False]]
+    w=ClientMainWindow();qtbot.addWidget(w)
+    try:
+        assert w.depth_near.value()==.15 and w.depth_far.value()==3.
+        assert w.depth_filter.isChecked()
+        revision=w.generation
+        w.depth_filter.setChecked(False)
+        assert w.generation>revision
+        w.depth_near.setValue(.5);w.depth_far.setValue(2.)
+        assert w.depth_near.value()==.5 and w.depth_far.value()==2.
+    finally:w.close()
+
+
+def test_depth_display_can_include_20cm_without_changing_mapping_default():
+    import numpy as np
+    from egohand.vio.map_depth import StereoDepth
+    class Matcher:
+        def compute(self,left,right):return np.full(left.shape,80,dtype=np.int16)
+    engine=StereoDepth(np.eye(3),1.,1.);engine.matcher=Matcher()
+    image=np.zeros((3,12),dtype=np.uint8)
+    assert engine.estimate(image,image)[1,8]==0
+    assert engine.estimate(image,image,min_depth_m=.01,max_depth_m=float('inf'))[1,8]==pytest.approx(.2)
 
 
 def test_hands_are_placed_in_world_frame_with_current_pose(qtbot):
