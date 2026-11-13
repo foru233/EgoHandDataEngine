@@ -48,6 +48,43 @@ class RecoveryCoordinator:
         self.quarantine_cause=None;self.evidence_status=None
         self.reference_generation=None
 
+    def reset_for_new_map(self):
+        """Start an independent map after an explicit recovery timeout.
+
+        The old map's quarantine must not leak into the new map.  The session
+        and transaction sequence stay intact, while all coordinate-bound
+        evidence and prediction state are deliberately discarded.
+        """
+        self.trusted_visual_identity=None
+        self.predictor.anchor=None
+        self.predictor.samples=[]
+        self.invalid_reason=None
+        self.map_epoch=None
+        self.world_frame_revision=None
+        self.reference_generation=None
+        self.tracking_was_lost=False
+        self.ever_tracking_ok=False
+        self.recovery_evidence_required=False
+        self.quarantined=False
+        self.anchor_hold_ns=None
+        self.quarantine_since_ns=None
+        self.new_map_requested=False
+        self.quarantine_cause=None
+        self.evidence_status=None
+        self.callback_results=[]
+
+    def _timeout_request(self, stamp, *, application_commit=False):
+        """Return timeout fields for both normal and identity-failure paths."""
+        if self.quarantined and self.quarantine_since_ns is None:
+            self.quarantine_since_ns=int(stamp)
+        elapsed=max(0, int(stamp)-self.quarantine_since_ns) if self.quarantine_since_ns is not None else 0
+        timed_out=bool(self.quarantined and elapsed>=self.quarantine_timeout_ns)
+        allowed_actions=('independent_new_map','legacy_new_map') if (not self.application_admission or application_commit) else ('legacy_new_map',)
+        request=bool(timed_out and self.timeout_action in allowed_actions
+                     and not self.new_map_requested)
+        if request:self.new_map_requested=True
+        return elapsed, timed_out, request
+
     def _quarantine(self, cause, evidence_status):
         # Preserve the original trigger: subsequent unavailable callbacks while
         # already quarantined are not independent recovery evidence.
@@ -151,17 +188,13 @@ class RecoveryCoordinator:
         if feedback['pose_admitted'] and not self.quarantined:
             self.trusted_visual_identity=visual_reference(result)
         stamp=int(result['timestamp_ns'])
-        if self.quarantined and self.quarantine_since_ns is None:self.quarantine_since_ns=stamp
-        elapsed=max(0,stamp-self.quarantine_since_ns) if self.quarantine_since_ns is not None else 0
         # Abandon the unverified old reference; never release its pose on time.
-        request_new_map=bool(self.quarantined and elapsed>=self.quarantine_timeout_ns and
-            self.timeout_action=='independent_new_map' and not self.new_map_requested)
-        if request_new_map:self.new_map_requested=True
+        elapsed,timed_out,request_new_map=self._timeout_request(stamp,application_commit=True)
         report={**native,'stage':'committed','anchor_available':self.predictor.anchor is not None,
                 'await_visual_requalification':self.quarantined,
                 'quarantine_cause':self.quarantine_cause,'evidence_status':self.evidence_status,
                 'quarantine_elapsed_s':elapsed*1e-9,
-                'quarantine_timed_out':bool(self.quarantined and elapsed>=self.quarantine_timeout_ns),
+                'quarantine_timed_out':timed_out,
                 'request_new_map':request_new_map,'application_quality_passed':feedback['quality_passed'],
                 'application_pose_admitted':feedback['pose_admitted'] and not self.quarantined}
         self._pending_application=None
@@ -196,15 +229,14 @@ class RecoveryCoordinator:
             if self.ever_tracking_ok or self.quarantined:
                 self._quarantine(failure,'unavailable')
             stamp=int(result['timestamp_ns'])
-            if self.quarantined and self.quarantine_since_ns is None:self.quarantine_since_ns=stamp
-            elapsed=max(0,stamp-self.quarantine_since_ns) if self.quarantine_since_ns is not None else 0
+            elapsed,timed_out,request_new_map=self._timeout_request(stamp)
             return {'candidates':list(self.callback_results),'direct_recovery':None,'loss_prediction':None,
                     'anchor_available':False,'await_visual_requalification':self.quarantined,
                     'quarantine_elapsed_s':elapsed*1e-9,
-                    'quarantine_timed_out':bool(self.quarantined and elapsed>=self.quarantine_timeout_ns),
+                    'quarantine_timed_out':timed_out,
                     'timeout_action':self.timeout_action,'quarantine_cause':self.quarantine_cause,
                     'evidence_status':self.evidence_status,'body_snapshot_consistent':False,
-                    'request_new_map':False,'mode':'experimental',
+                    'request_new_map':request_new_map,'mode':'experimental',
                     'identity_transition_status':failure}
         body_consistent=snapshot_body_matches_frame(result,body)
         revision=result.get('world_frame_revision')
@@ -331,12 +363,8 @@ class RecoveryCoordinator:
                 and not self.quarantined and scale_finalized is True):
             self._update_anchor(result,body)
         stamp=int(result['timestamp_ns'])
-        if self.quarantined and self.quarantine_since_ns is None:self.quarantine_since_ns=stamp
         if not self.quarantined:self.quarantine_since_ns=None;self.new_map_requested=False
-        elapsed=max(0,stamp-self.quarantine_since_ns) if self.quarantine_since_ns is not None else 0
-        timed_out=bool(self.quarantined and elapsed>=self.quarantine_timeout_ns)
-        request_new_map=bool(timed_out and self.timeout_action=='legacy_new_map' and not self.new_map_requested)
-        if request_new_map:self.new_map_requested=True
+        elapsed,timed_out,request_new_map=self._timeout_request(stamp)
         return {'candidates':list(self.callback_results),'direct_recovery':direct_recovery,
                 'visual_release':visual_release,'loss_prediction':prediction,'anchor_available':self.predictor.anchor is not None,
                 'await_visual_requalification':self.quarantined,'quarantine_elapsed_s':elapsed*1e-9,

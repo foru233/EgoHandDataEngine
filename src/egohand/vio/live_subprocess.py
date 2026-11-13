@@ -70,6 +70,10 @@ def serve(sock, bridge, map_output=None, *, recovery_enabled=None, recovery_prot
                 return 0
             return {'consistent':1,'inconsistent':0,'unavailable':-1}[result['status']]
         bridge.set_recovery_callback(check_candidate)
+    def start_independent_map():
+        bridge.start_new_map()
+        if coordinator is not None:
+            coordinator.reset_for_new_map()
     try:
       while True:
         try:stamp,w,h,n=HEADER.unpack(receive(sock,HEADER.size))
@@ -132,7 +136,7 @@ def serve(sock, bridge, map_output=None, *, recovery_enabled=None, recovery_prot
         if coordinator is not None:
             response['recovery_preaccept']=coordinator.finish_frame(response,body)
             if response['recovery_preaccept']['request_new_map']:
-                bridge.start_new_map()
+                start_independent_map()
                 response['automatic_new_map']=True
                 print('Recovery timeout: starting a new map',flush=True)
         send(sock,response)
@@ -142,7 +146,7 @@ def serve(sock, bridge, map_output=None, *, recovery_enabled=None, recovery_prot
             feedback=json.loads(receive(sock,length).decode('utf8'))
             committed=coordinator.finish_application_frame(feedback)
             if committed['request_new_map']:
-                bridge.start_new_map()
+                start_independent_map()
                 committed['automatic_new_map']=True
                 print('Unverified old reference abandoned: scheduled an independent new map',flush=True)
             send(sock,{'type':'recovery_committed','recovery_preaccept':committed})

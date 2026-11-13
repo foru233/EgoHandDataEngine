@@ -110,6 +110,21 @@ def test_timeout_requests_new_map_once_and_never_releases_old_coordinates():
     assert fresh['local_motion']['cross_segment_merge_permitted'] is False
 
 
+def test_identity_failure_timeout_requests_new_map_and_reset_clears_old_quarantine():
+    c,p,run=system(timeout=.03)
+    run(frame(1_000_000_000));run(frame(1_010_000_000,state='LOST'))
+    first=frame(1_020_000_000,state='LOST')
+    first['reference_generation']=2;first['reference_frame']['generation']=2
+    assert not run(first)['recovery_preaccept']['request_new_map']
+    late=frame(1_050_000_000,state='LOST')
+    late['reference_generation']=2;late['reference_frame']['generation']=2
+    timed=run(late)
+    assert timed['recovery_preaccept']['quarantine_timed_out']
+    assert timed['recovery_preaccept']['request_new_map']
+    c.reset_for_new_map()
+    assert not c.quarantined and c.predictor.anchor is None and c.map_epoch is None
+
+
 def test_geometry_cannot_release_changed_world_reference_or_disabled_policy():
     c,p,run=system(short=False)
     run(frame(1_000_000_000));run(frame(1_010_000_000,state='LOST'))
