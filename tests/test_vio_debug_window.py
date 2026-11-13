@@ -89,4 +89,4 @@ def test_plane_view_draws_offscreen(app):
     view.draw(pts, estimate_breaks=[10])
     image = view.grab()
     assert not image.isNull()
-    assert image.width() == 320
+    assert round(image.width() / image.devicePixelRatio()) == 320

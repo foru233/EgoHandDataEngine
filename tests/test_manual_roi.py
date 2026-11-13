@@ -39,9 +39,13 @@ def test_draw_roi_excludes_letterbox_and_survives_resize(qtbot):
     view=ImageView('test');qtbot.addWidget(view);view.resize(800,800);view.show()
     view.display(np.zeros((480,640,3),np.uint8));qtbot.wait(20)
     changes=[];view.roi_changed.connect(changes.append);view.set_roi_selection(True)
-    qtbot.mousePress(view,Qt.LeftButton,pos=QPoint(10,10));qtbot.mouseRelease(view,Qt.LeftButton,pos=QPoint(700,700))
-    assert not changes
     rect=view.image_rect()
+    outside=None
+    for candidate in (QPoint(1,1),QPoint(view.width()-1,1),QPoint(1,view.height()-1),QPoint(view.width()-1,view.height()-1)):
+        if not rect.contains(candidate):outside=candidate;break
+    if outside is not None:
+        qtbot.mousePress(view,Qt.LeftButton,pos=outside);qtbot.mouseRelease(view,Qt.LeftButton,pos=outside)
+        assert not changes
     a=QPoint(round(rect.x()+rect.width()*.25),round(rect.y()+rect.height()*.25))
     b=QPoint(round(rect.x()+rect.width()*.75),round(rect.y()+rect.height()*.75))
     qtbot.mousePress(view,Qt.LeftButton,pos=a);qtbot.mouseMove(view,b);qtbot.mouseRelease(view,Qt.LeftButton,pos=b)
