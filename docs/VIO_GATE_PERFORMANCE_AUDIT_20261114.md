@@ -106,6 +106,8 @@ flowchart LR
 
 该次独立的 `world_contract_audit.json` 检查 23409 个有效世界关节，未发现同帧契约、段身份或坐标变换错误；1066 帧 world available、224 帧 unavailable、30 帧无有效关节。仍仅为内部一致性，不是物理真值或连续性认证。两次长回放中跳变发生的具体帧不同，体现运行间调度变化。
 
+对同一 1320 帧位姿日志再运行 `audit_vio_frame_snapshots.py` 和 `audit_world_frame_changes.py`：1320/1320 帧的 `snapshot_consistent` 与 `snapshot_available` 均为 true，快照审计违规数为 0，原生 raw pose valid 为 1316、应用准入为 1096；以 0.5 m、0.2 s 筛选时没有同段相邻世界坐标跳变候选。固定标定下 body/camera 外参闭合误差统计最大约 0.135 m，但该闭合使用当前录制的候选坐标关系，不能作为绝对精度证据；它只说明日志字段没有触发当前代数检查的矛盾。报告位于 `results/hand_111833_v4_long1320_20261114/snapshot_audit.json` 和 `world_frame_audit/world_frame_changes.json`。
+
 ## 尚缺证据
 
 需要用固定输入、配置和 DLL 哈希重复对照，独立测量解码、复制、校正、检测、原生子阶段、队列与 GUI；覆盖恢复事件和 GT，评估误放行、地图身份、世界手部误发布、长运行及资源。当前无充分证据确认精度不退化或安全地缩短门控，不调整准入阈值。已有离线结果不能验收真实设备时间同步或长期稳定性。
