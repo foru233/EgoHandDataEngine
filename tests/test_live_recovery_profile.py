@@ -65,3 +65,23 @@ def test_research_gui_exposes_same_v4_profile_choice(qtbot):
         assert window.vio_panel.live_profile.itemText(window.vio_panel.live_profile.findData('v4')) == 'v4 实时恢复实验版'
     finally:
         window.close()
+
+
+def test_customer_vio_status_uses_customer_language(qtbot):
+    from client_gui import ClientMainWindow
+
+    window = ClientMainWindow()
+    qtbot.addWidget(window)
+    try:
+        assert '初始化' in window._customer_vio_status({'type': 'status', 'message': '等待双目与 IMU'})
+        assert 'IMU 临时预测' in window._customer_vio_status({
+            'type': 'pose',
+            'recovery_preaccept': {'loss_prediction': {'status': 'predicted'}},
+        })
+        assert '新地图建立中' in window._customer_vio_status({'type': 'pose', 'automatic_new_map': True})
+        assert '定位正常' in window._customer_vio_status({
+            'type': 'pose', 'localization': {'state': 'VIO_TRACKING',
+                'admission': {'map_pose_available': True}},
+        })
+    finally:
+        window.close()

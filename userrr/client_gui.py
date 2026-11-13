@@ -2,7 +2,7 @@
 import sys
 from pathlib import Path
 import time
-from collections import OrderedDict
+from collections import OrderedDict,deque
 import numpy as np
 import yaml
 from PySide6.QtCore import Qt, QTimer, Signal
@@ -56,6 +56,7 @@ class ClientMainWindow(QMainWindow):
         self._hand_poses=OrderedDict();self._hand_pose_world=None
         self._displayed_hand_stamp=None;self._displayed_hands=None
         self._displayed_hand_has_pose=False
+        self._vio_pose_times=deque(maxlen=40);self._last_vio_message=None;self._last_vio_latency_ms=None
         self.saved_replay=None
         self.smoother=DisplaySmoother(yaml.safe_load((ROOT/'configs/app.yaml').read_text(encoding='utf8')).get('display_smoothing'))
         self.image_aspect=4/3
@@ -213,6 +214,38 @@ class ClientMainWindow(QMainWindow):
     def show_error(self,text):
         self.last_error=text;self.set_status('提示：'+text)
 
+    def _customer_vio_status(self,message):
+        """Translate estimator states into short customer-facing guidance."""
+        kind=message.get('type')
+        if kind=='error':
+            detail=str(message.get('message','定位异常'))
+            return ('设备异常 · 请检查相机或 IMU 连接' if any(word in detail for word in ('VS030','相机','IMU','SDK'))
+                    else '定位不可用 · '+detail)
+        if kind in ('status','session_phase'):
+            detail=str(message.get('message',''))
+            if any(word in detail for word in ('等待双目','时序核验','初始化','加载 ORB')):
+                return '正在初始化定位 · 请缓慢移动相机，观察周围环境'
+            return detail or '正在初始化定位'
+        if kind=='vio_reset':
+            return '自动重定位 · 请面向清晰、有纹理的环境'
+        if kind!='pose':
+            return None
+        pre=message.get('recovery_preaccept') or {}
+        if message.get('automatic_new_map'):
+            return '新地图建立中 · 正在恢复局部定位'
+        prediction=pre.get('loss_prediction') or {}
+        if prediction.get('status')=='predicted':
+            return 'IMU 临时预测 · 当前为空间坐标未确认的临时结果'
+        localization=message.get('localization') or {}
+        state=localization.get('state')
+        if pre.get('await_visual_requalification') or state in ('DEGRADED','VISUAL_INITIALIZING'):
+            return '视觉暂时丢失 · 请放慢移动，系统正在恢复'
+        if localization.get('admission',{}).get('map_pose_available'):
+            return '定位正常 · 可以正常行走和识别'
+        if state in ('INERTIAL_INITIALIZING','INERTIAL_REFINING','WAITING_FOR_SENSORS'):
+            return '正在初始化定位 · 请缓慢移动相机，观察周围环境'
+        return '定位暂时不可用 · 请暂停需要连续空间坐标的任务'
+
     def sync_controls(self):
         running=bool(self.session.worker and self.session.worker.isRunning())
         for w in (self.source,self.mode,self.open_button,self.results_button,self.start_button):w.setEnabled(not running)
@@ -314,6 +347,11 @@ class ClientMainWindow(QMainWindow):
                 if world is not None:self._paused_vio_world=world
             if message.get('type')=='error':self.set_status('提示：'+str(message.get('message','定位异常')))
             return
+        if message.get('type')=='pose':
+            self._last_vio_message=dict(message);self._vio_pose_times.append(time.monotonic())
+            timing=(message.get('runtime_performance') or {}).get('timing_ms') or {}
+            if isinstance(timing.get('submit_to_admission'),(int,float)):
+                self._last_vio_latency_ms=float(timing['submit_to_admission'])
         # 视觉/VIO来源切换仅断开显示线段，不代表底层地图或世界坐标已重置。
         self.vio_panel.update_live(message)
         if message.get('type')=='pose':
@@ -351,8 +389,8 @@ class ClientMainWindow(QMainWindow):
         else:
             text=message.get('message')
             if text:self.world_meta.setText(str(text))
-        if message.get('type') in ('status','error') and message.get('message'):
-            self.set_status(str(message['message']))
+        customer_status=self._customer_vio_status(message)
+        if customer_status:self.set_status(customer_status)
 
     def on_finished(self):
         self.paused=False;self._paused_vio_reset=None;self._paused_vio_world=None
@@ -385,7 +423,14 @@ class ClientMainWindow(QMainWindow):
             self._sync_aspect(frame)
             valid_count=sum(h.valid_joint_count for h in result.hands)
             hands_note=f'手部 {len(result.hands)} 只 · {valid_count} 关节'
-            self.footer.setText(f"{self.mode.currentText()}   ·   {hands_note}   ·   处理 {stats.get('processing_fps',0):.1f} FPS   ·   {time.strftime('%H:%M:%S')}")
+            vio_fps=0.0
+            if len(self._vio_pose_times)>1:
+                span=self._vio_pose_times[-1]-self._vio_pose_times[0]
+                if span>0:vio_fps=(len(self._vio_pose_times)-1)/span
+            latency=self._last_vio_latency_ms
+            vio_note=f"VIO {vio_fps:.1f} FPS" if vio_fps else 'VIO — FPS'
+            if latency is not None:vio_note+=f' · VIO延迟 {latency:.1f} ms'
+            self.footer.setText(f"采集 {stats.get('read_fps',0):.1f} · 手部 {stats.get('processing_fps',0):.1f} · {vio_note} · 丢帧 {stats.get('dropped_frames',0)} · {time.strftime('%H:%M:%S')}")
             if time.monotonic()-self.depth_at>.08 and (self.depth_task is None or not self.depth_task.isRunning()):
                 self.depth_at=time.monotonic()
                 c=getattr(self,'calibration',None)

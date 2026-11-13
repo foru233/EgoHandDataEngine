@@ -9,7 +9,7 @@
 - Profile 证据：[profile_provenance.json](profile_provenance.json)。
 - Profile 几何、ABI 标记和哈希校验：4 项定向测试通过。
 - 实时运行时、两个 GUI、传感器模式、离线候选回归：53 项定向测试通过。
-- 全项目：`935 passed, 1 skipped, 2 warnings`。
+- 全项目：`936 passed, 1 skipped, 2 warnings`。
 
 ## 现有回归
 
