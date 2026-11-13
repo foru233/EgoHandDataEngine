@@ -324,7 +324,7 @@ camera_to_imu_lag_ms: -85.0      # 仅 timestamp 回退模式
 
 ### 背景导入
 
-- `claude-desktop-zh-cn` 中文补丁项目已存在于 `E:\EgoHandDataEngine\claude-desktop-zh-cn`（非 git 克隆，是解压后的源码树）。Windows 安装方式：退出 Claude Desktop → 双击 `install-windows.bat` → UAC 授权 → 选操作 `1`（安装中文补丁，第三方 API 模式）→ 选语言 `1`（简体中文）。脚本会备份被修改的文件并在卸载时恢复。注意：脚本会改写 `app.asar` / `ion-dist.asar` 并更新 `Claude.exe` 的 ASAR 头哈希，原有 Authenticode 签名会失效（脚本会修补 `cowork-svc.exe` 的签名校验分支）。当前沙箱是 Linux，无法直接执行 Windows 安装脚本，需在 Windows 机器上操作。
+- `claude-desktop-zh-cn` 中文补丁项目位于仓库根目录下（非 git 克隆，是解压后的源码树）。Windows 安装方式：退出 Claude Desktop → 双击 `install-windows.bat` → UAC 授权 → 选操作 `1`（安装中文补丁，第三方 API 模式）→ 选语言 `1`（简体中文）。脚本会备份被修改的文件并在卸载时恢复。注意：脚本会改写 `app.asar` / `ion-dist.asar` 并更新 `Claude.exe` 的 ASAR 头哈希，原有 Authenticode 签名会失效（脚本会修补 `cowork-svc.exe` 的签名校验分支）。当前沙箱是 Linux，无法直接执行 Windows 安装脚本，需在 Windows 机器上操作。
 
 ### 修复 3：地图尺度未定时不再把视觉位姿当作米制绝对坐标
 
@@ -371,7 +371,7 @@ camera_to_imu_lag_ms: -85.0      # 仅 timestamp 回退模式
 
 ### claude-desktop-zh-cn 安装说明
 
-`E:\EgoHandDataEngine\claude-desktop-zh-cn` 与上游 `javaht/claude-desktop-zh-cn` 的 `main` 分支逐文件一致（diff 无差异）。
+仓库根目录下的 `claude-desktop-zh-cn` 与上游 `javaht/claude-desktop-zh-cn` 的 `main` 分支逐文件一致（diff 无差异）。
 
 在 Windows 上安装：
 1. 完全退出 Claude Desktop。

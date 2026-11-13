@@ -1,6 +1,6 @@
 @echo off
 REM 在 Windows 上为 EgoHandDataEngine 的 VIO 工作站安装 Claude Desktop 中文界面补丁。
-REM 依赖 E:\EgoHandDataEngine\claude-desktop-zh-cn\scripts\install_windows.ps1。
+REM 依赖仓库根目录下 claude-desktop-zh-cn\scripts\install_windows.ps1。
 REM
 REM 用法：
 REM   scripts\install_claude_zh_cn.bat          交互式安装（会弹 UAC）

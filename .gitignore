@@ -43,6 +43,11 @@ Desktop.ini
 /exports/
 /results/
 /benchmark-results/
+/.pytest_tmp/
+/demo/
+/map_creat/
+/samples10-15gb/
+/claude-desktop-zh-cn/
 /data/
 /datasets/
 /build/
@@ -57,6 +62,10 @@ pytest.xml
 /tools/
 /SDK/
 /handoff/
+/userrr/sessions/
+/userrr/screenshots/
+/userrr/validation/
+/标定结果/
 
 # ---------- 大体积二进制、模型与数据集 ----------
 models/*.task

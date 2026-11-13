@@ -63,7 +63,7 @@
 
 ## 当前结论
 
-- 实时双目图像已可由 Windows 本机通过 ADB USB 网络直连获取，不依赖 E:\camera_2_up。
+- 实时双目图像已可由 Windows 本机通过 ADB USB 网络直连获取，不依赖旧的本地相机目录。
 - 设备启动脚本 run_all.sh 会调用 cam_fsync.sh 30；现场 sysfs 实测 PWM period=33,333,333 ns、duty=16,666,666 ns、enable=1、polarity=normal。说明设备确实配置了约30Hz硬件触发。用户已确认双目同步；PWM 观测本身不提供曝光时间差的定量测量，图像与 IMU 的时间关系仍待验证。
 - 已新增 src/egohand/sources/vendor_imu.py：直接读取相机 Android/Linux IIO 的 LSM6DSV16X 陀螺仪和加速度计，原始时间戳与 clock-domain 显式保留。
 - 该 IMU 适配器已在真实相机上完成约 2 秒短时采集：陀螺仪 1045 条、加速度计 1062 条；两路数据均严格递增，0 丢弃、0 非单调。设备报告 current_timestamp_clock=realtime。已用持续 ADB shell 做80次时钟探测：预热后 host perf_counter 与设备 realtime 的估计偏移中位数约 -1,793,009,597,269,294 ns，往返延迟中位数3.181 ms、最低0.537 ms、偏移观测范围4.17 ms。它是初步时钟映射，不是相机曝光同步验收。设备自身 realtime 约为 Unix epoch 后20.9天（系统日期并未校准到现实日期），因此不能直接使用设备 wall-clock 日期。

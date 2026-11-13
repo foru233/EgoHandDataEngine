@@ -1,11 +1,11 @@
-import json, subprocess, time, datetime
+import json, os, subprocess, sys, time, datetime
 from pathlib import Path
 R=Path(__import__('pathlib').Path(__file__).resolve().parents[1])
 D=R/"samples/date/hot3d"
 plan=json.loads((D/"expansion_plan_20261104.json").read_text())
 src=D/"expansion_results_20261104.json"; progress=D/"expansion_status_20261104.json"
 report=D/"expansion_conversion_status_20261104.json"
-tool=Path(r"E:\yolo\envs\ultralytics-8.4.174\python.exe")
+tool=Path(os.environ.get("EGOHAND_HOT3D_PYTHON", sys.executable))
 converted=set();failed={}
 for cycle in range(900):
     items=json.loads(src.read_text()) if src.exists() else []
