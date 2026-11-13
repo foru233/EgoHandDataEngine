@@ -31,6 +31,7 @@ class ImageTile(QWidget):
         self.view.setParent(self)
         self.caption=QLabel('',self.view)
         self.caption.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.caption.setWordWrap(True)
         self.caption.hide()
 
     def set_aspect(self,aspect):
@@ -59,6 +60,7 @@ class ImageTile(QWidget):
     def resizeEvent(self,event):
         super().resizeEvent(event)
         self._place()
+        self._place_caption()
 
     def showEvent(self,event):
         super().showEvent(event)
@@ -68,10 +70,14 @@ class ImageTile(QWidget):
         if not text:
             self.caption.hide();return
         self.caption.setText(text)
-        self.caption.adjustSize()
-        self.caption.move(8,6)
+        self._place_caption()
         self.caption.show()
         self.caption.raise_()
+
+    def _place_caption(self):
+        width=max(1,min(self.caption.sizeHint().width(),self.view.width()-16))
+        self.caption.setGeometry(8,6,width,self.caption.heightForWidth(width))
+        self.caption.setToolTip(self.caption.text())
 
     def clear(self):
         self.view.set_roi_selection(False)
@@ -186,10 +192,9 @@ class DepthTask(QThread):
 
     completed=Signal(int,object,str)
 
-    def __init__(self,generation,frame,calibration,cache,parent=None,*,near_m=.15,far_m=3.,filter_range=True):
+    def __init__(self,generation,frame,calibration,cache,parent=None):
         super().__init__(parent)
         self.generation=generation;self.frame=frame;self.calibration=calibration;self.cache=cache
-        self.near_m=float(near_m);self.far_m=float(far_m);self.filter_range=bool(filter_range)
 
     def run(self):
         try:
@@ -203,12 +208,11 @@ class DepthTask(QThread):
             if swapped:images=images[::-1]
             depth=depth_engine.estimate(*images,min_depth_m=0.01,max_depth_m=float('inf'))
             if vertical:depth=depth.T
-            color,valid=colorize_depth(depth,self.near_m,self.far_m,self.filter_range)
+            color,valid=colorize_depth(depth,.15,3.,False)
             color[~valid]=0
             ms=(time.perf_counter()-started)*1000
             text=(f'深度 · '+('右目参考' if swapped else '左目参考')+
-                  f' · {self.near_m:g}–{self.far_m:g} m'+(' · 范围内' if self.filter_range else ' · 全部有效值')+
-                  f' · 有效 {valid.mean():.0%} · {ms:.0f} ms')
+                  f' · 全部有效值 · {valid.mean():.0%} · {ms:.0f} ms')
             self.completed.emit(self.generation,color,text)
         except Exception as exc:
             self.completed.emit(self.generation,None,'深度暂不可用：'+str(exc))
@@ -228,7 +232,7 @@ def colorize_depth(depth,near_m,far_m,filter_range=True):
 class DepthCache:
     """按标定复用校正器与 SGBM 匹配器，避免每次刷新重建映射表。"""
 
-    # 与 StereoDepth.estimate 的有效门限一致的近端距离，用来反推需要的视差搜索宽度。
+    # 显示匹配器按 0.10 m 计算搜索宽度；有效距离还受视差和匹配质量限制。
     NEAR_M=.10
 
     def __init__(self):
@@ -262,9 +266,7 @@ class DepthCache:
         swapped=rectifier.P2[rectifier.disparity_axis,3]>0
         baseline=float(np.linalg.norm(calibration.t_right_left))
         depth_engine=StereoDepth(projection,baseline,scale)
-        # 只改显示用匹配器的搜索窗口：原厂默认 96 对应最近 0.06 m，远超 0.25 m 的近端门限，
-        # 多出来的搜索宽度只会加宽左右两侧搜索死区（黑边）并拖慢计算。其余参数与
-        # StereoDepth.__init__ 保持一致，深度换算和有效门限完全不变。
+        # 仅对显示匹配器调整搜索窗口；其余地图和定位调用保留自己的默认参数。
         disparities=self.required_disparities(depth_engine.fx,baseline)
         if disparities!=96:
             depth_engine.matcher=cv2.StereoSGBM_create(

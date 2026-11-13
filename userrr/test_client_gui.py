@@ -154,13 +154,8 @@ def test_depth_range_controls_only_display_and_filter_valid_values(qtbot):
     assert all_mask.tolist()==[[False,True,True,True,True,True,False]]
     w=ClientMainWindow();qtbot.addWidget(w)
     try:
-        assert w.depth_near.value()==.15 and w.depth_far.value()==3.
-        assert w.depth_filter.isChecked()
-        revision=w.generation
-        w.depth_filter.setChecked(False)
-        assert w.generation>revision
-        w.depth_near.setValue(.5);w.depth_far.setValue(2.)
-        assert w.depth_near.value()==.5 and w.depth_far.value()==2.
+        assert not hasattr(w,'depth_near') and not hasattr(w,'depth_filter')
+        assert '全部有效值' in w.depth_tile.caption.text()
     finally:w.close()
 
 
