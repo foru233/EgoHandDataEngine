@@ -163,6 +163,7 @@ class LiveVioWorker:
         self.proc=None
         self.settings=None
         self.log_path=None
+        self.last_identity=None
         self._lock=threading.Lock()
 
     def preload(self):
@@ -170,17 +171,28 @@ class LiveVioWorker:
         config=resolve_live_config()
         self.request_session(None,config.settings,'preload')
 
-    def request_session(self, port, settings, session, *, mode=DEFAULT_MODE):
+    def request_session(self, port, settings, session, *, mode=DEFAULT_MODE,
+                        environment=None, library_path=None):
         mode=validate_mode(mode)
         if mode=='hybrid':
             from .hybrid_settings import visual_bootstrap_settings
             settings=visual_bootstrap_settings(settings)
         from .library_manifest import select_library
-        library=select_library(ROOT/'src/egohand/vio/native')
+        explicit_environment=dict(environment or {})
+        env=apply_mode_environment(vio_subprocess_environment(recovery_protocol=PROTOCOL),mode)
+        env.update(explicit_environment)
+        library=Path(library_path).resolve() if library_path is not None else None
+        if library is None and env.get('EGOHAND_VIO_LIBRARY'):
+            library=Path(env['EGOHAND_VIO_LIBRARY']).resolve()
+        if library is None:
+            library=select_library(ROOT/'src/egohand/vio/native')
         if mode=='hybrid':
             library=Path(__file__).resolve().parent/'native'/'bin'/'egohand_vio_visual_bootstrap.dll'
-        env=apply_mode_environment(vio_subprocess_environment(recovery_protocol=PROTOCOL),mode)
         env['EGOHAND_VIO_CONFIG']=str(settings)
+        env['EGOHAND_VIO_LIBRARY']=str(library)
+        env['PATH']=str(library.parent)+os.pathsep+env.get('PATH','')
+        if not library.is_file():
+            raise FileNotFoundError(f'指定的 VIO 候选桥接库不存在：{library}')
         identity=(mode, settings, hashlib.sha256(settings.read_bytes()).hexdigest(),
                   library, hashlib.sha256(library.read_bytes()).hexdigest() if library.is_file() else None,
                   _environment_identity(env))
@@ -198,6 +210,19 @@ class LiveVioWorker:
                         creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0)|0x00008000,
                     )
                 self.settings=identity
+                self.last_identity={
+                    'mode':mode,'session':session,'pid':getattr(self.proc,'pid',None),
+                    'library':str(library),'library_sha256':hashlib.sha256(library.read_bytes()).hexdigest(),
+                    'settings':str(settings),'settings_sha256':hashlib.sha256(settings.read_bytes()).hexdigest(),
+                    'recovery_config':env.get('EGOHAND_VIO_RECOVERY_CONFIG'),
+                    'recovery_config_sha256':(
+                        hashlib.sha256(Path(env['EGOHAND_VIO_RECOVERY_CONFIG']).read_bytes()).hexdigest()
+                        if env.get('EGOHAND_VIO_RECOVERY_CONFIG') and Path(env['EGOHAND_VIO_RECOVERY_CONFIG']).is_file()
+                        else None),
+                    'reused':False,
+                }
+            elif self.last_identity is not None:
+                self.last_identity={**self.last_identity,'session':session,'reused':True}
             try:
                 self.proc.stdin.write((json.dumps([port,session])+'\n').encode('ascii'))
                 self.proc.stdin.flush()
@@ -223,7 +248,8 @@ class LiveVioWorker:
 
 
 class LiveVio:
-    def __init__(self,source,on_status,timing=None,*,worker=None,mode=DEFAULT_MODE):
+    def __init__(self,source,on_status,timing=None,*,worker=None,mode=DEFAULT_MODE,
+                 config_snapshot=None, environment=None, library_path=None):
         self.mode=validate_mode(mode)
         self.use_imu=self.mode!=STEREO
         self.source=source;self.on_status=on_status;self.frames=queue.Queue(maxsize=1)
@@ -234,6 +260,9 @@ class LiveVio:
         self.ready_event=threading.Event();self.ready=False;self.startup_error=None
         self.motion_event=threading.Event();self.motion_samples=0
         self.timing_override=dict(timing) if timing is not None else None
+        self.config_snapshot=config_snapshot
+        self.vio_environment=dict(environment or {})
+        self.vio_library_path=library_path
         self.defer_imu=False
         self._frame_stats_lock=threading.Lock()
         self._frame_stats={'submitted':0,'deferred':0,'replaced':0,'dequeued':0,'restart_discarded':0}
@@ -324,7 +353,7 @@ class LiveVio:
         proc=None;worker_failed=False;retry=False;worker_log=None;phase_preparation=None
         try:
             from .config_snapshot import resolve_live_config, load_config_snapshot
-            config=resolve_live_config()
+            config=self.config_snapshot or resolve_live_config()
             if self.timing_override is not None:
                 config=load_config_snapshot(calibration=config.calibration,
                     settings=live_settings(self.timing_override),timing=config.timing_path,
@@ -358,10 +387,15 @@ class LiveVio:
             quality=make_quality_gate(self.mode,resume_same_map=False,**quality_cfg)
             if self.stop_event.is_set():return
             proc,reused,worker_log=self.worker.request_session(
-                listener.getsockname()[1],settings.resolve(),log_path.stem,mode=self.mode)
+                listener.getsockname()[1],settings.resolve(),log_path.stem,mode=self.mode,
+                environment=self.vio_environment,library_path=self.vio_library_path)
             log.write(f'ORB-SLAM3 进程日志：{worker_log}\n')
+            identity=getattr(self.worker,'last_identity',None)
+            if identity:
+                log.write('VIO child identity: '+json.dumps(identity,ensure_ascii=False)+'\n')
             self.on_status({'type':'status','message':('正在复用 ORB-SLAM3 词典，准备新会话…' if reused
-                else '正在加载 ORB-SLAM3 词典，定位将在加载完成后启动…')})
+                else '正在加载 ORB-SLAM3 词典，定位将在加载完成后启动…'),
+                'vio_identity':identity})
             deadline=time.monotonic()+60
             while not self.stop_event.is_set():
                 try:self.sock,_=listener.accept();break

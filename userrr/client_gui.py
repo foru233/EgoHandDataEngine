@@ -15,6 +15,7 @@ from egohand.gui.shared.presentation import display_stereo,clear_stereo
 from egohand.gui.theme import THEMES,stylesheet
 from egohand.gui.vio_panel import VioPanel
 from egohand.vio.live_runtime import LiveVioWorker
+from egohand.vio.live_recovery import LiveRecoveryProfile
 from egohand.vio.local_segments import consumer_display_pose as consumer_map_pose,display_reference_key
 from egohand.storage.replay import load_recorded_results,SavedResultReplay
 from egohand.visualization.display_smoothing import DisplaySmoother
@@ -36,10 +37,11 @@ QPushButton#start{border-color:#5FE0C5;color:#5FE0C5;font-weight:600;}'''
 
 
 class ClientMainWindow(QMainWindow):
-    def __init__(self, *, recovery_profile=None, replay_output_dir=None):
+    def __init__(self, *, recovery_profile=None, live_recovery_profile=None, replay_output_dir=None):
         super().__init__();self.setWindowTitle('EgoHand DELIVERY · 客户交付版 · VS030')
-        self.recovery_profile=recovery_profile;self.replay_output_dir=replay_output_dir
+        self.recovery_profile=recovery_profile;self.live_recovery_profile=live_recovery_profile;self.replay_output_dir=replay_output_dir
         if recovery_profile:self.setWindowTitle('EgoHand · '+recovery_profile.label)
+        elif live_recovery_profile:self.setWindowTitle('EgoHand · '+live_recovery_profile.label)
         area=self.screen().availableGeometry();self.resize(min(1600,area.width()-40),min(950,area.height()-60));self.setMinimumSize(900,620)
         self.session=SessionController(self);self.latest=None;self.recording=False;self.pending_record=False
         self.paused=False;self._paused_vio_reset=None;self._paused_vio_world=None
@@ -87,6 +89,8 @@ class ClientMainWindow(QMainWindow):
         if self.recovery_profile:
             self.source.clear();self.source.addItem('录制回放 · 离线候选','recorded')
             self.mode.clear();self.mode.addItem('双目＋IMU · 恢复候选 v4','stereo_inertial')
+        elif self.live_recovery_profile:
+            self.mode.clear();self.mode.addItem('双目＋IMU · v4 实时恢复实验版','stereo_inertial')
         self.mode.setToolTip('混合模式只运行一个IMU_STEREO实例；允许视觉先建图，IMU初始化并通过门控后优先使用VIO。定位精度仍待验收，仅停止后切换。')
         self.source.setMinimumWidth(120);self.mode.setMinimumWidth(150)
         selection.addWidget(self.source);selection.addWidget(self.mode)
@@ -102,6 +106,9 @@ class ClientMainWindow(QMainWindow):
         self.source_label=QLabel('选择数据源后启动。');self.source_label.setObjectName('compactMeta');self.source_label.setWordWrap(True);layout.addWidget(self.source_label)
         if self.recovery_profile:
             self.profile_label=QLabel(self.recovery_profile.label+' · 仅处理离线录制')
+            self.profile_label.setWordWrap(True);layout.addWidget(self.profile_label)
+        elif self.live_recovery_profile:
+            self.profile_label=QLabel(self.live_recovery_profile.label+' · 仅显式实验入口 · 不改变正式默认')
             self.profile_label.setWordWrap(True);layout.addWidget(self.profile_label)
 
         # 三列：左 3D（吸收多余空间）、中 深度/校正左/校正右（单列）、右 原始左右。
@@ -138,7 +145,7 @@ class ClientMainWindow(QMainWindow):
         for name in ('slider','details','raw_container','filtered_title','filtered_status','fit_comparison'):
             widget=getattr(self.vio_panel,name,None)
             if widget is not None:widget.hide()
-        for name in ('live_enabled','show_estimate','show_truth','compare_native','compare_map','update_map'):
+        for name in ('live_enabled','live_profile','show_estimate','show_truth','compare_native','compare_map','update_map'):
             widget=getattr(self.vio_panel,name,None)
             if widget is not None:widget.hide()
         for widget in self.vio_panel.findChildren(QPushButton):widget.hide()
@@ -211,6 +218,8 @@ class ClientMainWindow(QMainWindow):
         for w in (self.source,self.mode,self.open_button,self.results_button,self.start_button):w.setEnabled(not running)
         if self.recovery_profile:
             self.source.setEnabled(False);self.mode.setEnabled(False)
+        elif self.live_recovery_profile:
+            self.mode.setEnabled(False)
         self.stop_button.setEnabled(running);self.record_button.setEnabled(running and self.source.currentData()!='recorded' and not self.pending_record)
         self.pause_button.setEnabled(running and not self.session.worker.stop_event.is_set())
         self.pause_button.setText('恢复' if self.paused else '暂停')
@@ -230,10 +239,13 @@ class ClientMainWindow(QMainWindow):
             kind=self.source.currentData();self.last_error=None
             if self.recovery_profile and (kind!='recorded' or self.mode.currentData()!='stereo_inertial'):
                 raise ValueError('离线恢复候选仅支持双目＋IMU录制回放')
+            if self.live_recovery_profile and kind!='vendor':
+                raise ValueError('v4 实时恢复实验版仅支持 VS030 设备；离线录制请使用离线候选入口')
             if kind=='recorded' and not self.recording_source:raise ValueError('请先导入录制目录')
             output=Path(self.replay_output_dir) if self.replay_output_dir else DELIVERY_ROOT/'sessions'/('replay_'+str(time.time_ns()))
             options={'vio_worker':self.live_vio_worker}
             if self.recovery_profile:options=self.recovery_profile.worker_options(self.recording_source,output)
+            elif self.live_recovery_profile:options={**options,**self.live_recovery_profile.worker_options()}
             source=create_source(SourceRequest(kind=kind,path=str(self.recording_source or ''),loop=False))
             detector=yaml.safe_load((ROOT/'configs/detector.yaml').read_text(encoding='utf8')) if kind!='synthetic' else None
             if detector:detector['model_path']=str(ROOT/detector['model_path'])
@@ -289,7 +301,7 @@ class ClientMainWindow(QMainWindow):
         self.calibration=info.get('calibration');meta=info.get('metadata');self.set_status('运行中')
         if not info.get('model_loaded') and not getattr(meta,'synthetic',False):
             self.set_status('手部模型未加载 · 相机预览仍可用')
-        self.source_label.setText('合成演示 · 非设备实测' if getattr(meta,'synthetic',False) else '录制回放 · 按原始数据重新计算' if self.source.currentData()=='recorded' else 'VS030 已连接 · 左右通道 / 当前算法已启用')
+        self.source_label.setText('合成演示 · 非设备实测' if getattr(meta,'synthetic',False) else '录制回放 · 按原始数据重新计算' if self.source.currentData()=='recorded' else 'VS030 已连接 · 左右通道 / '+('v4 恢复候选已启用' if self.live_recovery_profile else '当前算法已启用'))
 
     def on_vio(self,message):
         if self.paused:
@@ -339,6 +351,8 @@ class ClientMainWindow(QMainWindow):
         else:
             text=message.get('message')
             if text:self.world_meta.setText(str(text))
+        if message.get('type') in ('status','error') and message.get('message'):
+            self.set_status(str(message['message']))
 
     def on_finished(self):
         self.paused=False;self._paused_vio_reset=None;self._paused_vio_world=None

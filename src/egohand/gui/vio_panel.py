@@ -8,7 +8,7 @@ import yaml
 import pyqtgraph.opengl as gl
 from PySide6.QtCore import Qt,Signal,QEvent,QTimer
 from PySide6.QtGui import QColor,QVector3D,QVector4D
-from PySide6.QtWidgets import (QCheckBox,QFileDialog,QHBoxLayout,QLabel,QPushButton,
+from PySide6.QtWidgets import (QCheckBox,QComboBox,QFileDialog,QHBoxLayout,QLabel,QPushButton,
                                QSlider,QVBoxLayout,QWidget,QInputDialog,QMessageBox,QSplitter)
 from ..core.pipeline import ROOT
 from ..vio.trajectory import load_euroc_trajectory,load_tum_body_ground_truth,align_positions_to_ground_truth,rigid_transform
@@ -176,9 +176,13 @@ class VioPanel(QWidget):
         clear=QPushButton('清除');clear.clicked.connect(self.clear)
         self.live_enabled=QCheckBox('实时 VIO（实验）');self.live_enabled.setChecked(True)
         self.live_enabled.setToolTip('采集前设置；实时结果使用设备时钟和待验证的 IMU 数据布局。')
+        self.live_profile=QComboBox();self.live_profile.setAccessibleName('实时 VIO Profile')
+        self.live_profile.addItem('正式稳定版','stable')
+        self.live_profile.addItem('v4 实时恢复实验版','v4')
+        self.live_profile.setToolTip('v4 只在显式选择后加载隔离候选 DLL 和恢复配置，不改变正式默认。')
         self.show_estimate=QCheckBox('拟合 / 估计');self.show_estimate.setChecked(True)
         self.show_truth=QCheckBox('真值');self.show_truth.setChecked(True)
-        for widget in (load,gt,clear,self.show_estimate,self.show_truth,self.live_enabled):controls.addWidget(widget)
+        for widget in (load,gt,clear,self.show_estimate,self.show_truth,self.live_enabled,self.live_profile):controls.addWidget(widget)
         controls.addStretch();layout.addLayout(controls)
         comparison_controls=QHBoxLayout()
         self.compare_native=QCheckBox('原生 / 界面对比')
@@ -389,7 +393,12 @@ class VioPanel(QWidget):
             self.raw_status.setText('当前无实时位姿 · '+message.get('message',''))
             self.filtered_status.setText('当前无实时位姿 · '+message.get('message',''))
             self.live_pose_readout.emit('相机 6D 位姿 · 当前不可用')
-            self.details.setText(('实时 VIO 已停止 · ' if kind=='error' else '实时 VIO · ')+message.get('message',''))
+            identity=message.get('vio_identity') or {}
+            identity_text=''
+            if identity:
+                identity_text=(f" · PID {identity.get('pid','—')} · DLL SHA256 {str(identity.get('library_sha256',''))[:12]}"
+                               f" · 恢复配置 SHA256 {str(identity.get('recovery_config_sha256',''))[:12]}")
+            self.details.setText(('实时 VIO 已停止 · ' if kind=='error' else '实时 VIO · ')+message.get('message','')+identity_text)
             return
         if kind!='pose':return
         check=message.get('recovery_check')

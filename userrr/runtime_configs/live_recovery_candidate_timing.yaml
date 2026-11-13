@@ -1,0 +1,11 @@
+# Explicit VS030 v4 live candidate timing.  Session auto verification is
+# required for every device session; the phase below is only an initial hint.
+imu_alignment: lattice
+lattice_reference: packet
+lattice_phase_mode: session_auto
+lattice_phase_ms: 97.0
+camera_to_imu_lag_ms: -85.0
+imu_rate_hz: 480.0
+camera_to_imu_drift_ppm: 0.0
+image_scale: 1.0
+orb_config: handoff/vio_architecture_execution_20261113/bootstrap_full_settings.yaml

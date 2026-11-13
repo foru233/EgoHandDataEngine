@@ -1,0 +1,6 @@
+customer GUI smoke: PASS
+window_title=EgoHand · 双目＋IMU · v4 实时恢复实验版 · 精度待验收
+source_default=vendor
+mode=stereo_inertial / 双目＋IMU · v4 实时恢复实验版
+device_connected=False (software-only smoke)
+pipeline_started=False (no physical device was available)

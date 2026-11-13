@@ -36,7 +36,7 @@ class PipelineWorker(QThread):
     roi_settings_applied=Signal(dict,str)
     roi_settings_failed=Signal(str)
     recording_state_changed=Signal(bool,bool,str)
-    def __init__(self,source,config=None,detector_config=None,calibration=None,offline=False,parent=None,rois=None,live_vio=False,*,vio_worker=None,preset_map=None,vio_mode="stereo_inertial",vio_output_dir=None,vio_config_snapshot=None,vio_library_path=None,coordinated_stereo=False):
+    def __init__(self,source,config=None,detector_config=None,calibration=None,offline=False,parent=None,rois=None,live_vio=False,*,vio_worker=None,preset_map=None,vio_mode="stereo_inertial",vio_output_dir=None,vio_config_snapshot=None,vio_library_path=None,vio_environment=None,coordinated_stereo=False):
         from ..vio.modes import validate_mode
         self.vio_mode=validate_mode(vio_mode)
         super().__init__(parent)
@@ -46,6 +46,7 @@ class PipelineWorker(QThread):
         self.vio_output_dir=vio_output_dir;self.replay_vio=None;self._preview_error=None
         self.vio_config_snapshot=vio_config_snapshot
         self.vio_library_path=vio_library_path
+        self.vio_environment=dict(vio_environment or {})
         self.coordinated_stereo=bool(coordinated_stereo)
         self.preset_map=preset_map
         self.hot3d_mode=getattr(source,"view_mode","prediction");self.hot3d_processor=HOT3DFrameProcessor();self.show3d_processor=SHOW3DFrameProcessor()
@@ -515,7 +516,18 @@ class PipelineWorker(QThread):
                         self.live_vio.start()
                     else:
                         from ..vio.live_runtime import LiveVio
-                        self.live_vio=LiveVio(self.source,self._vio_status,worker=self.vio_worker,mode=self.vio_mode)
+                        live_options={'worker':self.vio_worker,'mode':self.vio_mode}
+                        # Keep the legacy constructor surface for test doubles
+                        # and downstream integrations when no explicit profile
+                        # is selected; candidate sessions receive the extra
+                        # isolated config/environment arguments.
+                        if self.vio_config_snapshot is not None:
+                            live_options['config_snapshot']=self.vio_config_snapshot
+                        if self.vio_environment:
+                            live_options['environment']=self.vio_environment
+                        if self.vio_library_path is not None:
+                            live_options['library_path']=self.vio_library_path
+                        self.live_vio=LiveVio(self.source,self._vio_status,**live_options)
                         self.live_vio.start(defer_imu=True)
                 # 该设备近距离按独立配置调整，其他数据集继续使用通用门限。
                 self.engine.config['max_epipolar_px']=self.engine.config.get('vs030_max_epipolar_px',self.engine.config['max_epipolar_px'])

@@ -28,6 +28,7 @@ from ..storage.exporter import export_all
 from ..storage.replay import load_recorded_results,SavedResultReplay
 from ..core.pipeline import ROOT
 from ..vio.live_runtime import LiveVioWorker
+from ..vio.live_recovery import LiveRecoveryProfile
 
 from .workspace import build_workspace, apply_theme, sync_controls, present_result
 from ..visualization.skeleton_view import optical_to_display
@@ -295,10 +296,16 @@ class MainWindow(QMainWindow):
             if self.source_panel.kind.currentIndex() in (1,2,3,4,5,6):
                 detector={"model_path":str(self.model_path),**{key:self.detector_config[key] for key in DETECTOR_KEYS}}
             live_vio=isinstance(source,XdSdkStereoSource) and self.vio_panel.live_enabled.isChecked()
+            live_profile=None
+            if self.vio_panel.live_profile.currentData()=='v4':
+                if not live_vio:
+                    raise ValueError('v4 实时恢复实验版仅支持 VS030 实时设备')
+                live_profile=LiveRecoveryProfile()
             preset=(self.vio_panel.map_directory,self.vio_panel.map_manifest,
                     self.vio_panel.map_updates,self.vio_panel.map_comparison) if live_vio and self.vio_panel.map_directory else None
             defaults={'use_epipolar_error':False,'use_reprojection_error':False,'enable_3d_tracking':True,'vs030_user_confirmed_sync':False}
-            self.worker=create_worker(source,worker_class=PipelineWorker,config={k:self.stereo_config.get(k,v) for k,v in defaults.items()},detector_config=detector,calibration=self.loaded_calibration,offline=self.source_panel.offline.isChecked(),parent=self,rois=self.roi_panel.settings(),live_vio=live_vio,vio_worker=self.live_vio_worker,preset_map=preset)
+            profile_options=live_profile.worker_options() if live_profile is not None else {}
+            self.worker=create_worker(source,worker_class=PipelineWorker,config={k:self.stereo_config.get(k,v) for k,v in defaults.items()},detector_config=detector,calibration=profile_options.pop('calibration',self.loaded_calibration),offline=self.source_panel.offline.isChecked(),parent=self,rois=self.roi_panel.settings(),live_vio=live_vio,vio_worker=self.live_vio_worker,preset_map=preset,**profile_options)
             if live_vio:self.vio_panel.begin_live(preset=preset is not None)
             self.worker.vio_status.connect(self.on_vio_status)
             self.worker.error.connect(self._error);self.worker.ready.connect(self.on_ready)
