@@ -21,6 +21,7 @@ from .vs030_geometry import prepare_vs030_vio_geometry
 from .hybrid_quality import make_quality_gate
 from .pose_continuity import PoseContinuityCorrector
 from .localization_state import LocalizationPipeline
+from .map_identity import world_identity
 from .modes import DEFAULT_MODE, STEREO, validate_mode, apply_mode_environment
 from .imu_lattice import LatticeImuBuffer, PacketLatticeImuBuffer, packet_lattice_phase_ns
 from .recovery_contract import (PROTOCOL, FRAME_CONTEXT, RESET_IMU_ALIGNMENT,
@@ -580,6 +581,26 @@ class LiveVio:
                 if result.get('matrix') is not None:
                     result['matrix']=(np.array(result['matrix'])@geometry.T_orb_left_from_gui_left).tolist()
                 result=localization.process(result,measurements)
+                # Additive GUI-only display contract.  This does not change
+                # pose admission, the formal matrix, or world-hand joins.
+                result['display_pose_contract']={
+                    'schema_version':1,
+                    'body_frame':'imu_body',
+                    'camera_frame':'gui_left_camera',
+                    'T_body_from_camera':(
+                        getattr(geometry,'T_imu_from_orb_left',np.eye(4)) @ geometry.T_orb_left_from_gui_left
+                    ).tolist(),
+                    'reference_frame':'map',
+                }
+                raw_matrix=result.get('raw_matrix')
+                if result.get('raw_pose_valid') and raw_matrix is not None:
+                    result['display_visual_candidate']={
+                        'schema_version':1,'timestamp_ns':result.get('timestamp_ns'),
+                        'frame_id':result.get('frame_id'),
+                        'reference_id':world_identity(result),
+                        'matrix':raw_matrix,
+                        'coordinate_frame':'map',
+                    }
                 result['live_capture']=live_capture_binding(frame,self.source_session_id)
                 result['live_config']=dict(live_config)
                 admitted_ns=time.perf_counter_ns()

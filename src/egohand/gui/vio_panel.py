@@ -14,6 +14,7 @@ from ..core.pipeline import ROOT
 from ..vio.trajectory import load_euroc_trajectory,load_tum_body_ground_truth,align_positions_to_ground_truth,rigid_transform
 from ..vio.localization_state import consumer_map_pose
 from ..vio.local_segments import consumer_display_pose,display_reference_key
+from ..vio.display_pose import BestEffortPoseSelector
 
 NAVIGATION_ROOT=ROOT/'samples'/'date'/'VIO'
 WORLD_AXIS_LENGTH_M=.25
@@ -26,11 +27,11 @@ def pose_axes(transform,length=CAMERA_AXIS_LENGTH_M):
     origin=pose[:3,3]
     return np.vstack((origin,origin+length*pose[:3,:3].T))
 
-def live_camera_pose_text(message):
+def live_camera_pose_text(message, *, best_effort=None):
     """显示当前有效的左相机位姿；不将失效帧或历史位姿冒充实时结果。"""
-    T=consumer_display_pose(message)
+    T=best_effort.matrix if best_effort is not None and best_effort.source != 'origin' else consumer_display_pose(message)
     if T is None:
-        return '相机 6D 位姿 · 当前不可用'
+        return '相机 6D 位姿 · 位置已冻结或当前不可用'
     try:
         from scipy.spatial.transform import Rotation
         xyz=T[:3,3]
@@ -46,7 +47,11 @@ def live_camera_pose_text(message):
            '显示重锚坐标' if message.get('display_map_coordinates_preserved') is False else '世界坐标 W')
     # 双目基线提供度量尺度；惯性优化未完成仍不能保证尺度和位姿准确。
     scale_note='' if message.get('inertial_scale_finalized',True) else ' · 惯性优化未完成，尺度待验证'
-    return (f'左相机 6D · {frame} · XYZ {xyz[0]:+.3f}, {xyz[1]:+.3f}, {xyz[2]:+.3f} m{scale_note}\n'
+    source_note=''
+    if best_effort is not None:
+        source_note={'imu_prediction':' · IMU 临时预测','visual_candidate':' · 视觉候选，尚未验证',
+                     'frozen':f' · 位置已冻结（年龄 {best_effort.age_ms or 0:.1f} ms）'}.get(best_effort.source,'')
+    return (f'左相机 6D · {frame}{source_note} · XYZ {xyz[0]:+.3f}, {xyz[1]:+.3f}, {xyz[2]:+.3f} m{scale_note}\n'
             f'姿态 RPY（固定轴 XYZ） {roll:+.1f}°, {pitch:+.1f}°, {yaw:+.1f}°')
 
 class TrajectoryView(gl.GLViewWidget):
@@ -84,12 +89,16 @@ class TrajectoryView(gl.GLViewWidget):
                 self.addItem(label);self.axis_items.append(label)
         self.update()
 
-    def draw(self,estimated,truth,estimate_on,truth_on,index,fit=False,*,estimate_breaks=()):
+    def draw(self,estimated,truth,estimate_on,truth_on,index,fit=False,*,estimate_breaks=(),
+             prediction=(),candidate=(),prediction_on=True,candidate_on=True,
+             prediction_breaks=(),candidate_breaks=()):
         for item in self.trajectory_items:self.removeItem(item)
         self.trajectory_items=[];all_points=[]
-        for points,enabled,color,breaks in (
-            (estimated,estimate_on,(.20,.87,.74,1.),estimate_breaks),
-            (truth,truth_on,(.85,.42,1.,1.),()),
+        for points,enabled,color,breaks,marker in (
+            (estimated,estimate_on,(.20,.87,.74,1.),estimate_breaks,False),
+            (truth,truth_on,(.85,.42,1.,1.),(),True),
+            (prediction,prediction_on,(1.0,.62,.18,1.),prediction_breaks,True),
+            (candidate,candidate_on,(1.0,.90,.25,1.),candidate_breaks,True),
         ):
             if not enabled or not len(points):continue
             points=np.asarray(points,dtype=float);all_points.append(points)
@@ -109,7 +118,7 @@ class TrajectoryView(gl.GLViewWidget):
             if len(line_points)>1:
                 item=gl.GLLinePlotItem(pos=line_points,mode=mode,color=color,width=2,antialias=True,glOptions='translucent')
                 self.addItem(item);self.trajectory_items.append(item)
-            if index is not None and index < len(points) and color != (.20,.87,.74,1.):
+            if index is not None and index < len(points) and marker:
                 item=gl.GLScatterPlotItem(pos=points[[index]],color=color,size=9,pxMode=True,glOptions='translucent')
                 self.addItem(item);self.trajectory_items.append(item)
         if fit and all_points:
@@ -160,6 +169,10 @@ class VioPanel(QWidget):
         super().__init__(parent)
         self.poses=[];self.truth=[];self.calibration=None;self.calibration_path=None;self.alignment=None
         self._live_previous=None
+        self._display_selector=BestEffortPoseSelector()
+        self._display_pose=None
+        self._prediction_points=[];self._prediction_breaks=[];self._prediction_source=None
+        self._candidate_points=[];self._candidate_breaks=[];self._candidate_source=None
         self.map_directory=None
         self.map_manifest=None
         self.map_cloud=None
@@ -297,6 +310,30 @@ class VioPanel(QWidget):
             '\n'+str(message.get('quality_status','')))
         if self.compare_native.isChecked():self._draw_raw_comparison()
 
+    def _append_display_track(self, name, matrix, source):
+        points = getattr(self, f'_{name}_points')
+        breaks = getattr(self, f'_{name}_breaks')
+        previous = getattr(self, f'_{name}_source')
+        if previous is not None and previous != source and points:
+            breaks.append(len(points))
+        points.append(np.asarray(matrix[:3, 3], dtype=float).copy())
+        setattr(self, f'_{name}_source', source)
+        if len(points) > 10000:
+            offset=len(points)-10000
+            del points[:offset]
+            setattr(self, f'_{name}_breaks', [b-offset for b in breaks if b > offset])
+
+    def _apply_display_pose(self, pose):
+        self._display_pose = pose
+        matrix = None if pose is None or pose.source == 'origin' else pose.matrix
+        if matrix is not None:
+            self.preview.set_pose_axes(matrix, show_world=bool(self.poses or self.truth or self.map_manifest))
+        if pose is not None and pose.source == 'imu_prediction':
+            self._append_display_track('prediction',matrix,pose.source)
+        elif pose is not None and pose.source == 'visual_candidate':
+            self._append_display_track('candidate',matrix,pose.source)
+        self._update_view()
+
     def import_map(self):
         from ..vio.map_package import read_package
         directory=QFileDialog.getExistingDirectory(self,'选择包含 map.json 的地图包')
@@ -418,19 +455,27 @@ class VioPanel(QWidget):
         preset=message.get('preset_map_id')
         if preset is not None and (self.map_manifest is None or preset!=self.map_manifest['map_id']):
             return
-        self.live_pose_readout.emit(live_camera_pose_text(message))
+        best = self._display_selector.update(message)
+        self._display_pose = best
+        self.live_pose_readout.emit(live_camera_pose_text(message, best_effort=best))
         admitted=consumer_display_pose(message)
         if preset is not None and admitted is None:
             self._update_raw_comparison(message)
             self._clear_map_layers()
-            self.preview.set_pose_axes(None)
+            if best.source in ('imu_prediction','visual_candidate','frozen') and best.matrix is not None:
+                self._apply_display_pose(best)
             self._live_gap_pending=True
             self.details.setText('正在寻找地图位置 · '+message.get('quality_status','跟踪未稳定'))
             return
         state=message.get('tracking_state','UNKNOWN');initialized=bool(message.get('imu_initialized'))
         from ..vio.map_identity import world_identity
-        epoch=display_reference_key(message)
-        segment=message.get('display_segment')
+        # Map identity controls resets; local segment identity only breaks the
+        # displayed line.  A loss frame has no estimated local_motion and must
+        # still belong to the same map for bounded IMU prediction.
+        epoch=world_identity(message)
+        motion_identity=message.get('local_motion') or {}
+        segment=message.get('display_segment') or (
+            motion_identity.get('segment_id') if motion_identity.get('status') == 'estimated' else None)
         if epoch is not None and self._live_map_epoch is not None and epoch!=self._live_map_epoch:
             self.poses=[];self.alignment=None
             self._reset_live_path()
@@ -438,8 +483,9 @@ class VioPanel(QWidget):
             self.preview.draw([],[],False,False,None)
         if epoch is not None:self._live_map_epoch=epoch
         if 'local_motion' in message and admitted is None:
-            self.poses=[];self._live_breaks=[]
-            self.preview.draw([],[],False,False,None)
+            # A local segment admission gap must not erase already trusted
+            # history.  The display selector may still provide a bounded
+            # prediction, candidate, or frozen pose.
             self.preview.set_hands([],None)
         if segment is not None:
             if self._live_display_segment is not None and segment!=self._live_display_segment:
@@ -464,7 +510,10 @@ class VioPanel(QWidget):
             self._update_view(fit=fit)
         else:
             self._live_gap_pending=True
-            self.preview.set_pose_axes(None)
+        if best.source in ('imu_prediction','visual_candidate','frozen') and best.matrix is not None:
+            self._apply_display_pose(best)
+        elif best.source == 'origin':
+            self._display_pose=best
         lag=message.get('camera_to_imu_lag_ms')
         timing=f' · 时差 {lag:+.0f} ms（实验）' if isinstance(lag,(int,float)) else ''
         retained=' · 保留历史轨迹' if self._live_gap_pending and self.poses else ''
@@ -498,6 +547,13 @@ class VioPanel(QWidget):
                                      f'{extrapolation.get("duration_s",0):.2f} s')
             except (TypeError,ValueError,IndexError):
                 pass
+        if best.source == 'imu_prediction':
+            prediction_text = (f'\nIMU 临时预测 · 相机轴持续显示 · {best.prediction_duration_s or 0:.2f} 秒 · '
+                               f'{best.coordinate_frame} 坐标 · 不写入可信轨迹')
+        elif best.source == 'visual_candidate':
+            prediction_text = '\n视觉候选，尚未验证 · 仅供参考，不解除恢复隔离'
+        elif best.source == 'frozen':
+            prediction_text = f'\n位置已冻结 · 数据年龄 {best.age_ms or 0:.1f} ms · '+str(best.reason)
         elif extrapolation.get('status')=='unavailable':
             prediction_text='\n纯 IMU 外推不可用：'+str(extrapolation.get('reason','缺少有效数据'))
         self.details.setText(f'实时 VIO（实验） · {state} · IMU'+('已初始化' if initialized else '初始化中')+
@@ -553,6 +609,10 @@ class VioPanel(QWidget):
         self._live_display_segment=None
         self._live_gap_pending=False
         self._live_breaks=[]
+        self._display_selector.reset()
+        self._display_pose=None
+        self._prediction_points=[];self._prediction_breaks=[];self._prediction_source=None
+        self._candidate_points=[];self._candidate_breaks=[];self._candidate_source=None
 
     def set_map_controls_enabled(self,enabled):
         self.load_map.setEnabled(enabled);self.close_map.setEnabled(enabled)
@@ -679,7 +739,11 @@ class VioPanel(QWidget):
                 nearest=min(nearby,key=lambda j:abs(stamps[j]-target))
                 if abs(stamps[nearest]-target)<=5_000_000:truth_index=nearest
         self.preview.draw(estimated,[],self.show_estimate.isChecked(),False,index if self.poses else None,
-                          estimate_breaks=self._live_breaks)
+                          estimate_breaks=self._live_breaks,
+                          prediction=np.asarray(self._prediction_points,dtype=float).reshape(-1,3),
+                          candidate=np.asarray(self._candidate_points,dtype=float).reshape(-1,3),
+                          prediction_breaks=self._prediction_breaks,
+                          candidate_breaks=self._candidate_breaks)
         camera_pose=None
         if self.poses and self.show_estimate.isChecked() and index<len(self.poses):
             camera_pose=self.poses[index].T_world_from_camera_left.copy()
@@ -688,7 +752,15 @@ class VioPanel(QWidget):
                 camera_pose[:3,3]=estimated[index]
         elif self.truth and self.show_truth.isChecked() and truth_index is not None:
             camera_pose=self.truth[truth_index].T_world_from_camera_left
-        self.preview.set_pose_axes(camera_pose,show_world=bool(self.poses or self.truth or self.map_manifest))
+        if (self._display_pose is not None and self._display_pose.source in
+                ('imu_prediction','visual_candidate','frozen')):
+            camera_pose=self._display_pose.matrix
+        elif camera_pose is None and self._display_pose is not None and self._display_pose.source != 'origin':
+            camera_pose=self._display_pose.matrix
+        if camera_pose is not None:
+            self.preview.set_pose_axes(camera_pose,show_world=bool(self.poses or self.truth or self.map_manifest))
+        elif self._display_pose is None or self._display_pose.source == 'origin':
+            self.preview.set_pose_axes(None,show_world=bool(self.poses or self.truth or self.map_manifest))
         self._sync_comparison_camera()
         # 单独添加真值，保留两条轨迹独立的当前点索引。
         if self.show_truth.isChecked() and len(truth):

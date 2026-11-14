@@ -72,6 +72,34 @@ def test_imu_only_loss_prediction_is_not_added_as_visual_pose():
     assert '纯 IMU 外推' in panel.details.text() and '非视觉位姿' in panel.details.text()
     assert not panel.poses
 
+
+def test_best_effort_prediction_moves_camera_axes_without_formal_track_append():
+    app=QApplication.instance() or QApplication([])
+    panel=VioPanel();panel.begin_live();panel.preview.resize(640,420)
+    identity=np.eye(4).tolist()
+    panel.update_live({'type':'pose','timestamp_ns':1,'frame_id':1,'tracking_state':'OK',
+        'pose_valid':True,'imu_initialized':True,'map_epoch':1,'matrix':identity})
+    body=np.eye(4);body[0,3]=.8
+    panel.update_live({'type':'pose','timestamp_ns':2,'frame_id':2,'tracking_state':'LOST',
+        'pose_valid':False,'imu_initialized':True,'map_epoch':1,'matrix':None,
+        'display_pose_contract':{'T_body_from_camera':identity},
+        'recovery_preaccept':{'loss_prediction':{'status':'predicted','duration_s':.5,
+            'T_world_from_body':body.tolist()}}})
+    assert len(panel.poses)==1
+    assert panel._display_pose.source=='imu_prediction'
+    assert panel._prediction_points and panel._prediction_points[-1][0]==.8
+    assert 'IMU 临时预测' in panel.details.text()
+    camera_x=panel.preview.axis_items[6]
+    np.testing.assert_allclose(camera_x.pos[0],[.8,0,0])
+    frozen=panel._display_pose.matrix.copy()
+    panel.update_live({'type':'pose','timestamp_ns':3,'frame_id':3,'tracking_state':'LOST',
+        'pose_valid':False,'imu_initialized':True,'map_epoch':1,'matrix':None,
+        'display_pose_contract':{'T_body_from_camera':identity},
+        'recovery_preaccept':{'loss_prediction':{'status':'predicted','duration_s':3.0,
+            'T_world_from_body':body.tolist()}}})
+    assert panel._display_pose.source=='frozen'
+    np.testing.assert_allclose(panel._display_pose.matrix,frozen)
+
 def test_automatic_new_map_status_is_visible():
     app=QApplication.instance() or QApplication([])
     panel=VioPanel();panel.begin_live()

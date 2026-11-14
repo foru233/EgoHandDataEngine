@@ -405,9 +405,17 @@ class ClientMainWindow(QMainWindow):
             self.world_meta.setText('混合 · '+source+(' · 跟踪中' if consumer_map_pose(message) is not None else ' · 等待稳定跟踪'))
             return
         if message.get('type')=='pose':
-            self.world_meta.setText('世界轨迹 · '+('跟踪中' if consumer_map_pose(message) is not None else '等待稳定跟踪'))
+            best=getattr(self.vio_panel,'_display_pose',None)
+            if best is not None and best.source=='imu_prediction':
+                self.world_meta.setText(f'IMU 临时预测 · 相机轴持续显示 · {best.prediction_duration_s or 0:.2f} 秒')
+            elif best is not None and best.source=='visual_candidate':
+                self.world_meta.setText('视觉候选，尚未验证 · 仅供参考')
+            elif best is not None and best.source=='frozen':
+                self.world_meta.setText(f'位置已冻结 · 数据年龄 {best.age_ms or 0:.1f} ms')
+            else:
+                self.world_meta.setText('世界轨迹 · '+('跟踪中' if consumer_map_pose(message) is not None else '等待稳定跟踪'))
             motion=message.get('local_motion') or {}
-            if 'local_motion' in message:
+            if 'local_motion' in message and (best is None or best.source in ('trusted','origin')):
                 self.world_meta.setText(f'局部段 {motion.get("segment_index","—")} · '
                     +('跟踪中' if consumer_map_pose(message) is not None else '定位不可用 · 手部保留相机坐标'))
         else:

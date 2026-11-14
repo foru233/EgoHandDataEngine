@@ -38,6 +38,7 @@ from .recovery_contract import (PROTOCOL, RecoveryProtocolError, application_fee
                                 send_message, negotiate_recovery)
 from .hybrid_quality import make_quality_gate
 from .localization_state import LocalizationPipeline
+from .map_identity import world_identity
 from .vs030_geometry import prepare_vs030_vio_geometry
 from .config_snapshot import resolve_recording_config
 from .modes import DEFAULT_MODE, STEREO, HYBRID, validate_mode, apply_mode_environment
@@ -870,6 +871,23 @@ class ReplayVio:
                             np.asarray(matrix, dtype=float) @ geometry.T_orb_left_from_gui_left
                         ).tolist()
                     result = localization.process(result, measurements)
+                    result['display_pose_contract']={
+                        'schema_version':1,
+                        'body_frame':'imu_body',
+                        'camera_frame':'gui_left_camera',
+                        'T_body_from_camera':(
+                            getattr(geometry,'T_imu_from_orb_left',np.eye(4)) @ geometry.T_orb_left_from_gui_left
+                        ).tolist(),
+                        'reference_frame':'map',
+                    }
+                    raw_matrix=result.get('raw_matrix')
+                    if result.get('raw_pose_valid') and raw_matrix is not None:
+                        result['display_visual_candidate']={
+                            'schema_version':1,'timestamp_ns':result.get('timestamp_ns'),
+                            'frame_id':result.get('frame_id'),
+                            'reference_id':world_identity(result),
+                            'matrix':raw_matrix,'coordinate_frame':'map',
+                        }
                 except (ConnectionError,OSError,RuntimeError) as exc:
                     if isinstance(exc,ReplayCancelled) or self._cancel.is_set() or not self.continue_on_localization_error:
                         raise
