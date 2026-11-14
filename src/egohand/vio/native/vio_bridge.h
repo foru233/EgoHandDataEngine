@@ -175,6 +175,13 @@ typedef int (EGOHAND_VIO_CALL *EgohandRecoveryCallback)(const float* Twb16, uint
 EGOHAND_VIO_API int EGOHAND_VIO_CALL egohand_vio_set_recovery_callback(
     void* handle, EgohandRecoveryCallback callback, void* context);
 
+/* Optional short-recovery geometry ABI marker.
+   The current bridge deliberately reports unavailable until an independent
+   native stereo/map geometry solver is wired in.  Presence of this export
+   lets the recovery worker fail closed with a structured unavailable result
+   instead of silently selecting a legacy DLL. */
+EGOHAND_VIO_API const char* EGOHAND_VIO_CALL egohand_vio_short_recovery_report(void);
+
 EGOHAND_VIO_API int EGOHAND_VIO_CALL egohand_vio_create(
     const char* vocabulary_path, const char* settings_path,
     int use_viewer, void** out_handle);

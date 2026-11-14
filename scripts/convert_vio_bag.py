@@ -1,5 +1,5 @@
 """ROS1 bag 只读转换：原始纳秒时间戳、无损灰度 PNG、真实 IMU。"""
-import argparse,csv,json,time
+import argparse,csv,hashlib,json,time
 from pathlib import Path
 import cv2,numpy as np
 from rosbags.rosbag1 import Reader
@@ -8,8 +8,13 @@ from rosbags.typesys import Stores,get_typestore
 ROOT=Path('samples/date/VIO')
 DATA={'euroc':ROOT/'EuRoC/MH_01_easy/MH_01_easy.bag','tumvi':ROOT/'TUM-VI/room4/dataset-room4_512_16.bag'}
 def ns(stamp):return int(stamp.sec)*1_000_000_000+int(stamp.nanosec)
-def convert(name):
- source=DATA[name];out=ROOT/'converted'/('EuRoC/MH_01_easy' if name=='euroc' else 'TUM-VI/room4')
+def file_hash(path):
+ digest=hashlib.sha256()
+ with path.open('rb') as f:
+  for chunk in iter(lambda:f.read(1024*1024),b''):digest.update(chunk)
+ return digest.hexdigest()
+def convert(name,source=None,out=None):
+ source=Path(source) if source else DATA[name];out=Path(out) if out else ROOT/'converted'/('EuRoC/MH_01_easy' if name=='euroc' else 'TUM-VI/room4')
  if out.exists():raise FileExistsError('目标已存在，拒绝覆盖：'+str(out))
  for side in ('cam0','cam1'):(out/'mav0'/side/'data').mkdir(parents=True)
  (out/'mav0/imu0').mkdir(parents=True)
@@ -31,7 +36,7 @@ def convert(name):
    dest=out/'mav0'/key/'data'/f'{t}.png'
    if dest.exists() or not cv2.imwrite(str(dest),image):raise IOError('PNG 写入失败或重名 '+str(dest))
    if key not in meta:meta[key]={'encoding':enc,'width':msg.width,'height':msg.height,'bit_depth':bits,'header_to_bag_ns_first':int(bag_ts)-t}
-  stats={'dataset':name,'source':str(source),'topics':{k:{'count':len(v),'first_ns':v[0] if v else None,'last_ns':v[-1] if v else None,'min_dt_ns':min(np.diff(v).tolist()) if len(v)>1 else None,'max_dt_ns':max(np.diff(v).tolist()) if len(v)>1 else None} for k,v in times.items()},'image':meta}
+  stats={'dataset':name,'source':str(source.resolve()),'source_sha256':file_hash(source),'converter_sha256':file_hash(Path(__file__)),'topics':{k:{'count':len(v),'first_ns':v[0] if v else None,'last_ns':v[-1] if v else None,'min_dt_ns':min(np.diff(v).tolist()) if len(v)>1 else None,'max_dt_ns':max(np.diff(v).tolist()) if len(v)>1 else None} for k,v in times.items()},'image':meta}
   common=sorted(set(times['cam0'])&set(times['cam1']));stats['paired_exact_timestamps']=len(common);stats['left_only']=len(set(times['cam0'])-set(times['cam1']));stats['right_only']=len(set(times['cam1'])-set(times['cam0']))
   if not common:raise ValueError('没有精确同步的双目时间戳，不允许猜测配对')
   (out/'timestamps.txt').write_text(''.join(str(t)+'\n' for t in common),encoding='utf8')
@@ -44,4 +49,6 @@ def convert(name):
   stats['decoded_samples']=checks;stats['tumvi_16bit_policy']='保留原始16位无损PNG；官方示例使用OpenCV IMREAD_GRAYSCALE读取为8位' if name=='tumvi' else None
   stats['elapsed_s']=time.perf_counter()-started;(out/'conversion_report.json').write_text(json.dumps(stats,ensure_ascii=False,indent=2),encoding='utf8');print(json.dumps(stats,ensure_ascii=False,indent=2),flush=True)
 if __name__=='__main__':
- p=argparse.ArgumentParser();p.add_argument('dataset',choices=list(DATA));convert(p.parse_args().dataset)
+ p=argparse.ArgumentParser();p.add_argument('dataset',choices=list(DATA));p.add_argument('--source',type=Path);p.add_argument('--output',type=Path);a=p.parse_args()
+ if (a.source is None)!=(a.output is None):p.error('--source and --output must be provided together')
+ convert(a.dataset,a.source,a.output)

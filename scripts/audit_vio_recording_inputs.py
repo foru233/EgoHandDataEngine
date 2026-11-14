@@ -47,9 +47,16 @@ def audit(recording):
     raw_imu = []
     lattice_times = []
     imu_sizes = Counter()
-    buffer = PacketLatticeImuBuffer(sample_rate_hz=timing["imu_rate_hz"],
-        camera_to_imu_drift_ppm=timing.get("camera_to_imu_drift_ppm", 0),
-        phase_ns=packet_lattice_phase_ns(timing))
+    buffer = None
+    phase_error = None
+    try:
+        if "lattice_phase_ms" not in timing:
+            raise ValueError("recording has no explicit session phase; no default is assumed")
+        buffer = PacketLatticeImuBuffer(sample_rate_hz=timing["imu_rate_hz"],
+            camera_to_imu_drift_ppm=timing.get("camera_to_imu_drift_ppm", 0),
+            phase_ns=packet_lattice_phase_ns(timing))
+    except (ValueError, KeyError) as exc:
+        phase_error = str(exc)
     # Read every original record, checking all binary headers and payload lengths.
     for record in iter_sdk_records(recording / manifest.get("sdk_records", "raw/sdk_records.bin")):
         if record.sink in streams:
@@ -62,9 +69,10 @@ def audit(recording):
             imu_sizes[len(record.payload) // IMU_PAYLOAD_ROW.size] += 1
             raw_imu.extend(IMU_PAYLOAD_ROW.unpack_from(record.payload, offset)
                 for offset in range(0, len(record.payload), IMU_PAYLOAD_ROW.size))
-            buffer.add(record.payload, record.device_ts)
-            lattice_times.extend(row[0] for row in buffer.rows)
-            buffer.rows.clear()
+            if buffer is not None:
+                buffer.add(record.payload, record.device_ts)
+                lattice_times.extend(row[0] for row in buffer.rows)
+                buffer.rows.clear()
     camera = {sink: {row["sequence"]: row for row in streams[sink]} for sink in (4, 5)}
     keys = sorted(camera[4].keys() & camera[5].keys())
     pairs = [(camera[4][key], camera[5][key]) for key in keys]
@@ -97,8 +105,9 @@ def audit(recording):
         "arrival_right_minus_left_ms": describe([(b["arrival"] - a["arrival"]) / 1e6 for a, b in valid_pairs]),
         "warning": "Equal sequence/device tags are not proof of equal exposure time. SDK capture/arrival clocks are unverified."}
     lattice_times = np.asarray(lattice_times, dtype=np.int64)
-    counts = np.diff(np.searchsorted(lattice_times, stamps, side="right"))
-    covered = (stamps[:-1] >= lattice_times[0]) & (stamps[1:] <= buffer.covered_until_ns)
+    counts = np.diff(np.searchsorted(lattice_times, stamps, side="right")) if len(lattice_times) else None
+    covered = ((stamps[:-1] >= lattice_times[0]) & (stamps[1:] <= buffer.covered_until_ns)
+               if len(lattice_times) and buffer is not None else None)
     report["imu"] = {"packets": len(streams[7]), "rows": len(raw),
         "samples_per_packet": dict(imu_sizes), "finite_values": bool(np.isfinite(raw).all()),
         "raw_time_a_delta_ms": describe(np.diff(raw[:, 0]) / 1e6),
@@ -107,16 +116,17 @@ def audit(recording):
         "raw_time_b_nonincreasing": int(np.sum(np.diff(raw[:, 1]) <= 0)),
         "raw_time_a_gaps_over_30ms": int(np.sum(np.diff(raw[:, 0]) > 30e6)),
         "lattice_sample_interval_ms": describe(np.diff(lattice_times) / 1e6),
-        "lattice_gap_events": buffer.gap_events,
-        "covered_camera_intervals": int(np.sum(covered)),
-        "leading_camera_frames_before_first_lattice_sample": int(np.sum(stamps < lattice_times[0])),
-        "trailing_camera_frames_after_lattice_coverage": int(np.sum(stamps > buffer.covered_until_ns)),
-        "samples_per_covered_camera_interval": dict(Counter(map(int, counts[covered]))),
+        "lattice_gap_events": buffer.gap_events if buffer is not None else None,
+        "lattice_unavailable_reason": phase_error,
+        "covered_camera_intervals": int(np.sum(covered)) if covered is not None else None,
+        "leading_camera_frames_before_first_lattice_sample": int(np.sum(stamps < lattice_times[0])) if len(lattice_times) else None,
+        "trailing_camera_frames_after_lattice_coverage": int(np.sum(stamps > buffer.covered_until_ns)) if len(lattice_times) else None,
+        "samples_per_covered_camera_interval": dict(Counter(map(int, counts[covered]))) if covered is not None else None,
         "accel_norm_candidate_mps2": describe(np.linalg.norm(raw[:, 2:5], axis=1)),
         "gyro_norm_candidate_rps": describe(np.linalg.norm(raw[:, 5:8], axis=1)),
         "timing": timing, "legacy_lag_applied_in_lattice": False}
     geometry = prepare_vs030_vio_geometry(recording / "kalibr_camchain.yaml")
-    scale = float(timing["image_scale"])
+    scale = float(timing["image_scale"]) if "image_scale" in timing else None
     fs = cv2.FileStorage(str(recording / "vio_settings.yaml"), cv2.FILE_STORAGE_READ)
     try:
         observed = {key: float(fs.getNode(key).real()) for key in
@@ -124,12 +134,13 @@ def audit(recording):
         T = fs.getNode("IMU.T_b_c1").mat()
     finally:
         fs.release()
-    expected = {key: float(geometry.rectifier.P1[i, j] * scale) for key, i, j in
+    expected = ({key: float(geometry.rectifier.P1[i, j] * scale) for key, i, j in
         [("Camera1.fx", 0, 0), ("Camera1.fy", 1, 1), ("Camera1.cx", 0, 2), ("Camera1.cy", 1, 2)]}
+        if scale is not None else None)
     report["snapshot_geometry"] = {"orb_left": "device channel5/cam1", "gui_left": "device channel4/cam0",
         "image_scale": scale, "expected_scaled_intrinsics": expected, "orb_intrinsics": observed,
-        "max_intrinsic_error_px": max(abs(expected[k] - observed[k]) for k in expected),
-        "imu_extrinsic_max_error": float(np.max(np.abs(T - geometry.T_imu_from_orb_left))),
+        "max_intrinsic_error_px": max(abs(expected[k] - observed[k]) for k in expected) if expected else None,
+        "imu_extrinsic_max_error": float(np.max(np.abs(T - geometry.T_imu_from_orb_left))) if T is not None else None,
         "warning": "Internal consistency only; not independent calibration accuracy."}
     report["manifest_hash_match"] = {"sdk": report["hashes"]["raw/sdk_records.bin"]["sha256"] == manifest.get("sdk_sha256"),
         "imu": report["hashes"]["raw/imu_records.bin"]["sha256"] == manifest.get("imu_sha256")}

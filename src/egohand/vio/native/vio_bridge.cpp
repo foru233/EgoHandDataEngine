@@ -150,7 +150,21 @@ int32_t EGOHAND_VIO_CALL egohand_vio_world_frame_info_size() { return (int32_t)s
 /* Additive tokens only: existing names keep their meaning and new ones are appended,
    so a caller can probe for optional features instead of sniffing the version string. */
 const char* EGOHAND_VIO_CALL egohand_vio_capabilities() {
-    return "map_appearance_v1;result;snapshot;body_state;recovery_callback;start_new_map;world_frame_revision;cheirality_guard;partial_map_event_frame_v1";
+    return "map_appearance_v1;result;snapshot;body_state;recovery_callback;short_recovery_report;start_new_map;world_frame_revision;cheirality_guard;partial_map_event_frame_v1";
+}
+
+/*
+ * ABI marker for the experimental short-recovery path.
+ *
+ * This bridge does not yet expose an independent native stereo/map geometry
+ * solver.  Returning enabled=false is intentional: the Python coordinator
+ * can run the transaction and keep every candidate quarantined, while the
+ * worker still rejects any attempt to treat IMU prediction as visual proof.
+ * A future solver must replace this with a frame-bound, identity-checked
+ * report matching short_recovery.py's native_stereo_map_geometry_v1 schema.
+ */
+const char* EGOHAND_VIO_CALL egohand_vio_short_recovery_report() {
+    return "{\"enabled\":false,\"available\":false,\"qualified\":false,\"reason\":\"native_geometry_solver_unavailable\"}";
 }
 
 int EGOHAND_VIO_CALL egohand_vio_get_map_event_frame(void* opaque, EgohandVioMapEventFrame* out, int32_t out_size) {
