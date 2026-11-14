@@ -192,7 +192,10 @@ class BestEffortPoseSelector:
         if self.last is not None and self.last.matrix is not None:
             age = self._age_ms(self.last.timestamp_ns, stamp, now_timestamp_ns)
             frozen = BestEffortCameraPose(
-                timestamp_ns=stamp if _valid_stamp(stamp) else self.last.timestamp_ns,
+                # Keep the timestamp of the last *new* estimate. Updating it
+                # on every frozen frame would make the displayed age reset to
+                # one frame forever.
+                timestamp_ns=self.last.timestamp_ns,
                 source_frame_id=message.get('frame_id', self.last.source_frame_id),
                 source_session_id=message.get('session_id', self.last.source_session_id),
                 source='frozen', status='frozen', T_reference_from_camera=self.last.matrix.copy(),

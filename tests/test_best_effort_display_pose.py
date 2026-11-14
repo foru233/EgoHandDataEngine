@@ -79,3 +79,14 @@ def test_loss_without_local_segment_keeps_same_map_prediction_and_json_identity(
     selector.reset()
     assert selector.update(candidate).source == 'visual_candidate'
 
+
+def test_frozen_age_accumulates_from_last_real_estimate():
+    selector = BestEffortPoseSelector()
+    base = np.eye(4).tolist()
+    selector.update(_pose(1_000_000_000, valid=True, matrix=base))
+    first = selector.update(_pose(1_100_000_000))
+    second = selector.update(_pose(1_600_000_000))
+    assert first.source == second.source == 'frozen'
+    assert first.age_ms == 100.0
+    assert second.age_ms == 600.0
+

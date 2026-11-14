@@ -1,0 +1,158 @@
+{
+  "schema_version": 1,
+  "kind": "host_only_shadow_gate",
+  "closed_loop": false,
+  "candidates": {
+    "111807": [
+      {
+        "stable_seconds": 0.0,
+        "shadow_quality_passed_frames": 118,
+        "baseline_application_admitted_frames": 71,
+        "shadow_earlier_than_baseline_frames": 47,
+        "closed_loop": false,
+        "limitation": "replays recorded raw snapshots through a host-only stability approximation; it does not rerun native VIO or recovery state"
+      },
+      {
+        "stable_seconds": 0.25,
+        "shadow_quality_passed_frames": 110,
+        "baseline_application_admitted_frames": 71,
+        "shadow_earlier_than_baseline_frames": 39,
+        "closed_loop": false,
+        "limitation": "replays recorded raw snapshots through a host-only stability approximation; it does not rerun native VIO or recovery state"
+      },
+      {
+        "stable_seconds": 0.5,
+        "shadow_quality_passed_frames": 102,
+        "baseline_application_admitted_frames": 71,
+        "shadow_earlier_than_baseline_frames": 31,
+        "closed_loop": false,
+        "limitation": "replays recorded raw snapshots through a host-only stability approximation; it does not rerun native VIO or recovery state"
+      },
+      {
+        "stable_seconds": 1.0,
+        "shadow_quality_passed_frames": 87,
+        "baseline_application_admitted_frames": 71,
+        "shadow_earlier_than_baseline_frames": 16,
+        "closed_loop": false,
+        "limitation": "replays recorded raw snapshots through a host-only stability approximation; it does not rerun native VIO or recovery state"
+      },
+      {
+        "stable_seconds": 1.5,
+        "shadow_quality_passed_frames": 72,
+        "baseline_application_admitted_frames": 71,
+        "shadow_earlier_than_baseline_frames": 1,
+        "closed_loop": false,
+        "limitation": "replays recorded raw snapshots through a host-only stability approximation; it does not rerun native VIO or recovery state"
+      },
+      {
+        "stable_seconds": 2.0,
+        "shadow_quality_passed_frames": 58,
+        "baseline_application_admitted_frames": 71,
+        "shadow_earlier_than_baseline_frames": 0,
+        "closed_loop": false,
+        "limitation": "replays recorded raw snapshots through a host-only stability approximation; it does not rerun native VIO or recovery state"
+      }
+    ],
+    "111833": [
+      {
+        "stable_seconds": 0.0,
+        "shadow_quality_passed_frames": 1314,
+        "baseline_application_admitted_frames": 1096,
+        "shadow_earlier_than_baseline_frames": 218,
+        "closed_loop": false,
+        "limitation": "replays recorded raw snapshots through a host-only stability approximation; it does not rerun native VIO or recovery state"
+      },
+      {
+        "stable_seconds": 0.25,
+        "shadow_quality_passed_frames": 1281,
+        "baseline_application_admitted_frames": 1096,
+        "shadow_earlier_than_baseline_frames": 185,
+        "closed_loop": false,
+        "limitation": "replays recorded raw snapshots through a host-only stability approximation; it does not rerun native VIO or recovery state"
+      },
+      {
+        "stable_seconds": 0.5,
+        "shadow_quality_passed_frames": 1250,
+        "baseline_application_admitted_frames": 1096,
+        "shadow_earlier_than_baseline_frames": 154,
+        "closed_loop": false,
+        "limitation": "replays recorded raw snapshots through a host-only stability approximation; it does not rerun native VIO or recovery state"
+      },
+      {
+        "stable_seconds": 1.0,
+        "shadow_quality_passed_frames": 1191,
+        "baseline_application_admitted_frames": 1096,
+        "shadow_earlier_than_baseline_frames": 95,
+        "closed_loop": false,
+        "limitation": "replays recorded raw snapshots through a host-only stability approximation; it does not rerun native VIO or recovery state"
+      },
+      {
+        "stable_seconds": 1.5,
+        "shadow_quality_passed_frames": 1144,
+        "baseline_application_admitted_frames": 1096,
+        "shadow_earlier_than_baseline_frames": 48,
+        "closed_loop": false,
+        "limitation": "replays recorded raw snapshots through a host-only stability approximation; it does not rerun native VIO or recovery state"
+      },
+      {
+        "stable_seconds": 2.0,
+        "shadow_quality_passed_frames": 1097,
+        "baseline_application_admitted_frames": 1096,
+        "shadow_earlier_than_baseline_frames": 30,
+        "closed_loop": false,
+        "limitation": "replays recorded raw snapshots through a host-only stability approximation; it does not rerun native VIO or recovery state"
+      }
+    ],
+    "184714": [
+      {
+        "stable_seconds": 0.0,
+        "shadow_quality_passed_frames": 3181,
+        "baseline_application_admitted_frames": 2811,
+        "shadow_earlier_than_baseline_frames": 370,
+        "closed_loop": false,
+        "limitation": "replays recorded raw snapshots through a host-only stability approximation; it does not rerun native VIO or recovery state"
+      },
+      {
+        "stable_seconds": 0.25,
+        "shadow_quality_passed_frames": 3144,
+        "baseline_application_admitted_frames": 2811,
+        "shadow_earlier_than_baseline_frames": 333,
+        "closed_loop": false,
+        "limitation": "replays recorded raw snapshots through a host-only stability approximation; it does not rerun native VIO or recovery state"
+      },
+      {
+        "stable_seconds": 0.5,
+        "shadow_quality_passed_frames": 3115,
+        "baseline_application_admitted_frames": 2811,
+        "shadow_earlier_than_baseline_frames": 304,
+        "closed_loop": false,
+        "limitation": "replays recorded raw snapshots through a host-only stability approximation; it does not rerun native VIO or recovery state"
+      },
+      {
+        "stable_seconds": 1.0,
+        "shadow_quality_passed_frames": 3055,
+        "baseline_application_admitted_frames": 2811,
+        "shadow_earlier_than_baseline_frames": 244,
+        "closed_loop": false,
+        "limitation": "replays recorded raw snapshots through a host-only stability approximation; it does not rerun native VIO or recovery state"
+      },
+      {
+        "stable_seconds": 1.5,
+        "shadow_quality_passed_frames": 2994,
+        "baseline_application_admitted_frames": 2811,
+        "shadow_earlier_than_baseline_frames": 184,
+        "closed_loop": false,
+        "limitation": "replays recorded raw snapshots through a host-only stability approximation; it does not rerun native VIO or recovery state"
+      },
+      {
+        "stable_seconds": 2.0,
+        "shadow_quality_passed_frames": 2935,
+        "baseline_application_admitted_frames": 2811,
+        "shadow_earlier_than_baseline_frames": 155,
+        "closed_loop": false,
+        "limitation": "replays recorded raw snapshots through a host-only stability approximation; it does not rerun native VIO or recovery state"
+      }
+    ]
+  },
+  "interpretation": "These are recorded-row counterfactuals for the host stability window only. They do not rerun native VIO, RecoveryCoordinator, map creation, or hand output; no candidate is safe to merge based on this file."
+}

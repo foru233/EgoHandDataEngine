@@ -1,0 +1,81 @@
+{
+  "input": "results\\hand_111807_v4_profile_20261114\\replay\\poses.jsonl",
+  "input_sha256": "2355d0238d34c57405fb6a64fd20760a4a8b95a08de717851847139fa4e8b0e4",
+  "frames": 120,
+  "admitted_frames": 71,
+  "raw_pose_frames": 118,
+  "tracking_counts": {
+    "NOT_INITIALIZED": 2,
+    "OK": 118
+  },
+  "reject_reason_counts": {
+    "tracking_unavailable": 2,
+    "imu_initialization_pending": 1,
+    "stable_window_pending": 46
+  },
+  "identity_transition_count": 0,
+  "identities": [
+    [
+      0,
+      0,
+      0
+    ]
+  ],
+  "recovery_episode_count": 0,
+  "recovery_episodes": [],
+  "shadow_stability": [
+    {
+      "stable_seconds": 0.0,
+      "shadow_quality_passed_frames": 118,
+      "baseline_application_admitted_frames": 71,
+      "shadow_earlier_than_baseline_frames": 47,
+      "closed_loop": false,
+      "limitation": "replays recorded raw snapshots through a host-only stability approximation; it does not rerun native VIO or recovery state"
+    },
+    {
+      "stable_seconds": 0.25,
+      "shadow_quality_passed_frames": 110,
+      "baseline_application_admitted_frames": 71,
+      "shadow_earlier_than_baseline_frames": 39,
+      "closed_loop": false,
+      "limitation": "replays recorded raw snapshots through a host-only stability approximation; it does not rerun native VIO or recovery state"
+    },
+    {
+      "stable_seconds": 0.5,
+      "shadow_quality_passed_frames": 102,
+      "baseline_application_admitted_frames": 71,
+      "shadow_earlier_than_baseline_frames": 31,
+      "closed_loop": false,
+      "limitation": "replays recorded raw snapshots through a host-only stability approximation; it does not rerun native VIO or recovery state"
+    },
+    {
+      "stable_seconds": 1.0,
+      "shadow_quality_passed_frames": 87,
+      "baseline_application_admitted_frames": 71,
+      "shadow_earlier_than_baseline_frames": 16,
+      "closed_loop": false,
+      "limitation": "replays recorded raw snapshots through a host-only stability approximation; it does not rerun native VIO or recovery state"
+    },
+    {
+      "stable_seconds": 1.5,
+      "shadow_quality_passed_frames": 72,
+      "baseline_application_admitted_frames": 71,
+      "shadow_earlier_than_baseline_frames": 1,
+      "closed_loop": false,
+      "limitation": "replays recorded raw snapshots through a host-only stability approximation; it does not rerun native VIO or recovery state"
+    },
+    {
+      "stable_seconds": 2.0,
+      "shadow_quality_passed_frames": 58,
+      "baseline_application_admitted_frames": 71,
+      "shadow_earlier_than_baseline_frames": 0,
+      "closed_loop": false,
+      "limitation": "replays recorded raw snapshots through a host-only stability approximation; it does not rerun native VIO or recovery state"
+    }
+  ],
+  "limitations": [
+    "Recorded poses are evidence of the configured run, not an external accuracy ground truth",
+    "Shadow stability is not a closed-loop A/B result",
+    "Correlated frames inside one recovery episode are not independent samples"
+  ]
+}
