@@ -36,7 +36,7 @@ def main():
     text = replace_once(text, "'actual admitted rectified camera transform times calibrated T_rectified_camera_from_body'",
                         "'actual admitted raw fisheye camera transform times calibrated T_camera_from_body'")
     text = replace_once(text, "p.add_argument('--frames', type=int, default=1000)",
-                        "p.add_argument('--frames', type=int, default=1000)\n    p.add_argument('--sequence', choices=['room1', 'room2', 'corridor4'], default='room1')\n    p.add_argument('--stable-seconds', type=float, choices=[0.5, 1.0, 1.5], default=1.5)")
+                        "p.add_argument('--frames', type=int, default=1000)\n    p.add_argument('--sequence', choices=['room1', 'room2', 'corridor4', 'room3_holdout'], default='room1')\n    p.add_argument('--stable-seconds', type=float, choices=[0.5, 1.0, 1.5], default=1.5)")
     text = replace_once(text, "'sequence': sequence, 'kind': args.kind, 'frames': args.frames,",
                         "'sequence': sequence, 'kind': args.kind, 'stable_seconds': args.stable_seconds, 'frames': args.frames,")
     with DEST.open('x', encoding='utf-8') as f:
