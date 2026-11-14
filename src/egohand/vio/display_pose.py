@@ -113,6 +113,7 @@ class BestEffortPoseSelector:
         self.last_segment_from_map = None
         self.last_segment_id = None
         self.last_extrinsic = None
+        self.has_trusted_pose = False
 
     def reset(self):
         self.last = None
@@ -120,6 +121,7 @@ class BestEffortPoseSelector:
         self.last_segment_from_map = None
         self.last_segment_id = None
         self.last_extrinsic = None
+        self.has_trusted_pose = False
 
     def update(self, message, *, now_timestamp_ns=None):
         stamp = message.get('timestamp_ns')
@@ -155,6 +157,7 @@ class BestEffortPoseSelector:
         except (TypeError, ValueError, OverflowError, KeyError):
             trusted = None
         if trusted is not None and _valid_stamp(stamp):
+            self.has_trusted_pose = True
             pose = self._make(message, trusted, 'trusted', 'trusted_pose', True, identity,
                               prediction_duration_s=None, now_timestamp_ns=now_timestamp_ns)
             self.last = pose

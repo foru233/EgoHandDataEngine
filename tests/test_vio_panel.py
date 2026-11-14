@@ -100,6 +100,23 @@ def test_best_effort_prediction_moves_camera_axes_without_formal_track_append():
     assert panel._display_pose.source=='frozen'
     np.testing.assert_allclose(panel._display_pose.matrix,frozen)
 
+
+def test_live_view_keeps_world_origin_and_does_not_move_camera_for_startup_candidate():
+    app=QApplication.instance() or QApplication([])
+    panel=VioPanel();panel.begin_live();panel.preview.resize(640,420)
+    assert len(panel.preview.axis_items)==6  # world X/Y/Z lines and labels
+    candidate=np.eye(4);candidate[0,3]=5.
+    panel.update_live({'type':'pose','timestamp_ns':1,'frame_id':1,'tracking_state':'OK',
+        'pose_valid':False,'imu_initialized':False,'map_epoch':1,'matrix':None,
+        'raw_pose_valid':True,'raw_matrix':candidate.tolist(),
+        'display_visual_candidate':{'timestamp_ns':1,'frame_id':1,'reference_id':1,
+                                    'matrix':candidate.tolist()}})
+    assert panel._display_pose.source=='visual_candidate'
+    assert not panel._display_selector.has_trusted_pose
+    assert len(panel._prediction_points)==0 and len(panel._candidate_points)==0
+    # Startup candidate cannot move the camera axes; world origin remains.
+    assert len(panel.preview.axis_items)==6
+
 def test_automatic_new_map_status_is_visible():
     app=QApplication.instance() or QApplication([])
     panel=VioPanel();panel.begin_live()
