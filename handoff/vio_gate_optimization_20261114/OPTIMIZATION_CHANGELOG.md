@@ -3,6 +3,7 @@
 | 文件 | 修改 | 风险边界 |
 |---|---|---|
 | `src/egohand/vio/display_pose.py` | 冻结状态保留最后真实估计时间戳，连续冻结年龄正确累计 | 仅 GUI 显示 |
+| `src/egohand/gui/vio_panel.py` | 实时初始阶段固定显示 W 原点；启动候选不驱动 C 轴；临时轨迹只标记最新点 | 仅 GUI 显示 |
 | `tests/test_best_effort_display_pose.py` | 增加连续冻结年龄测试 | 不改变运行时门控 |
 | `scripts/audit_gate_decisions.py` | 新增真实回放逐帧门控、事件时序和 shadow 输出 | 只读分析 |
 | `configs/vio/live_quality_fast_experimental.yaml` | 新增 0.5 秒应用层稳定窗口候选 | 仅显式快速离线候选 |
