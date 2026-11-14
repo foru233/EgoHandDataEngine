@@ -46,7 +46,7 @@ def main():
     DEST.with_suffix('.patch').write_text(patch, encoding='utf-8')
     report = {'source': str(SOURCE), 'source_sha256': hashlib.sha256(SOURCE.read_bytes()).hexdigest(),
               'runner': str(DEST), 'runner_sha256': hashlib.sha256(DEST.read_bytes()).hexdigest(),
-              'scope': 'TUM room1 development sequence, raw fisheye, fixed calibration candidate; GT scoring separate',
+              'scope': 'TUM room1/room2/corridor4 development sequences, raw fisheye, fixed calibration candidate; GT scoring separate',
               'warning': 'Native recovery geometry assumptions for raw fisheye must be assessed; not VS030 certification.'}
     DEST.with_name('tumvi_recovery_runner_provenance.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
     print(json.dumps(report, indent=2))
