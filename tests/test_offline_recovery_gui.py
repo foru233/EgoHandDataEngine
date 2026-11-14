@@ -137,3 +137,14 @@ def test_candidate_host_quality_gate_uses_explicit_policy_without_global_environ
     profile=OfflineRecoveryProfile()
     gate=make_quality_gate('stereo_inertial',recovery_config=profile.paths['recovery'])
     assert gate.allow_verified_stereo_bootstrap is True
+
+
+def test_fast_candidate_binds_half_second_quality_and_recovery_policy():
+    fast=OfflineRecoveryProfile(ROOT/'userrr/runtime_configs/offline_recovery_fast_candidate.json')
+    import yaml
+    quality=yaml.safe_load(fast.paths['quality'].read_text(encoding='utf8'))
+    recovery=yaml.safe_load(fast.paths['recovery'].read_text(encoding='utf8'))
+    assert fast.data['profile']=='offline_recovery_fast_candidate_v4'
+    assert quality['stable_seconds']==0.5
+    assert recovery['stable_seconds']==0.5
+    assert fast.data['files']['library']['sha256']==OfflineRecoveryProfile().data['files']['library']['sha256']

@@ -1,6 +1,6 @@
 # 测试结果
 
-专项显示和冻结修复：`22 passed`（`tests/test_best_effort_display_pose.py`、`tests/test_vio_panel.py`）。
+专项显示、冻结和坐标系稳定修复：`23 passed`（`tests/test_best_effort_display_pose.py`、`tests/test_vio_panel.py`）；离线候选配置回归合计 `31 passed`。
 
 门控/实时/回放相关回归在上轮代码基础上通过；本轮改动只涉及显示冻结时间和只读分析脚本。当前全量回归为 `962 passed, 1 skipped, 2 warnings`。
 

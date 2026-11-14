@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "same_recording": "data/session_20261112_184714_636910800",
+  "same_candidate_dll": "egohand_vio_short_recovery_candidate.dll",
+  "baseline_candidate_stable_seconds": 1.5,
+  "optimized_host_and_recovery_stable_seconds": 0.5,
+  "baseline_candidate": {
+    "frames": 1200,
+    "admitted_frames": 698,
+    "first_admission_after_dropout_index": 960,
+    "readmission_delay_s": 1.5,
+    "same_reference": true,
+    "pose_jump_frames": 4,
+    "quarantined_frames": 91,
+    "input_integrity": true
+  },
+  "optimized_candidate": {
+    "frames": 1200,
+    "admitted_frames": 875,
+    "first_admission_after_dropout_index": 934,
+    "readmission_delay_s": 0.633333,
+    "same_reference": true,
+    "pose_jump_frames": 2,
+    "quarantined_frames": 91,
+    "input_integrity": true
+  },
+  "interpretation": [
+    "The optimized run changed both application quality and RecoveryCoordinator candidate stability configs; changing only recovery config did not change the host gate and was discarded as an invalid experiment.",
+    "The VS030 recording has no external GT. Same-reference identity and internal geometry/recovery contracts passed, but absolute accuracy and false-recovery-rate nonincrease remain unverified.",
+    "The 0.5 s profile is explicit opt-in offline candidate only; production stable profile remains 1.5 s."
+  ]
+}

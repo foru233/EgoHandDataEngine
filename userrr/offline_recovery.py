@@ -22,6 +22,7 @@ class OfflineRecoveryProfile:
     def __init__(self, manifest=PROFILE):
         self.manifest = Path(manifest).resolve()
         self.data = json.loads(self.manifest.read_text(encoding='utf8'))
+        self.label = self.data.get('label', self.label)
         if self.data.get('schema_version') != 1:
             raise ValueError('不支持的离线候选配置版本')
         self.paths = {key: ROOT / value['path'] for key, value in self.data['files'].items()}

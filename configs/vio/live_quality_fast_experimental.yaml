@@ -1,0 +1,10 @@
+# Explicit opt-in offline fast recovery candidate. Production quality remains
+# configs/vio/live_quality.yaml with its 1.5 s stability window.
+stable_seconds: 0.5
+max_translation_speed_mps: 1.5
+translation_noise_allowance_m: 0.02
+max_rotation_speed_deg_s: 360.0
+rotation_noise_allowance_deg: 3.0
+pose_continuity: false
+continuity_max_speed_mps: 3.0
+continuity_min_jump_m: 0.25

@@ -1,0 +1,15 @@
+# Explicit opt-in fast offline candidate. Production and baseline candidate
+# retain recovery_candidate.yaml with stable_seconds=1.5.
+stable_seconds: 0.5
+quarantine_timeout_s: 3.0
+timeout_action: independent_new_map
+short_recovery: true
+allow_initialized_anchor: true
+max_boundary_hold_ns: 5000000
+max_gap_ns: 20000000
+max_duration_ns: 2000000000
+position_floor_m: 0.30
+position_growth_mps2: 2.0
+angle_floor_deg: 25.0
+angle_growth_deg_s: 90.0
+allow_verified_stereo_bootstrap: true

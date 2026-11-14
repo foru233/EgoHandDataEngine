@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "profile": "offline_recovery_fast_candidate_v4",
+  "label": "离线恢复快速候选 v4 · 0.5 秒稳定窗口 · 精度待验收",
+  "files": {
+    "calibration": {
+      "path": "标定结果/2/data3-camchain-imucam-measured.yaml",
+      "sha256": "ea0f6cc3db1881a3ea56b9e92a8f4ddf093d4bffb18e048f8f7a12056514e11d"
+    },
+    "settings": {
+      "path": "handoff/vio_architecture_execution_20261113/bootstrap_full_settings.yaml",
+      "sha256": "8e7cf1ee8837696ff8720880ee6acacf3bdf26bb5697bd7dda5b44b284046517"
+    },
+    "quality": {
+      "path": "configs/vio/live_quality_fast_experimental.yaml",
+      "sha256": "76ffad5083859fb1a4c59be7b96fc07d0156f14ffe5ef12f360a8912f5547eec"
+    },
+    "library": {
+      "path": "handoff/vio_recovery_bridge_20261113/bin/egohand_vio_short_recovery_candidate.dll",
+      "sha256": "d4e3d5f13341ff542111cee792ebac7aa160f976170330fd087fe8fca25c3158"
+    },
+    "recovery": {
+      "path": "handoff/vio_recovery_bridge_v4_20261113/recovery_candidate_fast.yaml",
+      "sha256": "015049217b13f20adeb9967d1044f220810c087ec27d3a21c6f3fef1aa6a348c"
+    }
+  },
+  "environment": {
+    "EGOHAND_VIO_GAUGE_CONSTRAINT": "1",
+    "EGOHAND_VIO_WORLD_FRAME_DISABLE": "0",
+    "EGOHAND_VIO_DEPTH_GATE": "0",
+    "EGOHAND_VIO_POINT_CLAMP": "0",
+    "EGOHAND_VIO_ENTRY_PRUNE": "0",
+    "EGOHAND_VIO_GAUGE_FIX": "0",
+    "EGOHAND_VIO_CHEIRALITY_GUARD": "1",
+    "EGOHAND_VIO_SHORT_RECOVERY": "1"
+  }
+}

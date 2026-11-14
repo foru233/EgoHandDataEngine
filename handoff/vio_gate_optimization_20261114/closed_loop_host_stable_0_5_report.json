@@ -1,0 +1,325 @@
+{
+  "input": "handoff\\vio_gate_optimization_20261114\\closed_loop_host_stable_0_5\\replay\\poses.jsonl",
+  "input_sha256": "07c384a9ac24abe8e3e9779cdb812b9ad62be583855c438b67271bf76bc4a8b5",
+  "frames": 1200,
+  "admitted_frames": 875,
+  "raw_pose_frames": 1078,
+  "tracking_counts": {
+    "NOT_INITIALIZED": 3,
+    "OK": 1078,
+    "RECENTLY_LOST": 119
+  },
+  "reject_reason_counts": {
+    "tracking_unavailable": 122,
+    "imu_initialization_pending": 16,
+    "stable_window_pending": 130,
+    "independent_visual_requalification_required": 91,
+    "await_visual_requalification": 91,
+    "pose_jump": 2
+  },
+  "identity_transition_count": 5,
+  "identities": [
+    [
+      0,
+      0,
+      0
+    ],
+    [
+      3,
+      0,
+      1
+    ],
+    [
+      6,
+      0,
+      2
+    ],
+    [
+      1048582,
+      0,
+      0
+    ],
+    [
+      1048585,
+      0,
+      1
+    ],
+    [
+      1048588,
+      0,
+      2
+    ]
+  ],
+  "recovery_episode_count": 2,
+  "recovery_episodes": [
+    {
+      "loss_start": {
+        "index": 141,
+        "frame_id": 141,
+        "timestamp_ns": 10798413448000,
+        "tracking_state": "RECENTLY_LOST",
+        "pose_valid": false,
+        "map_epoch": 3,
+        "world_frame_revision": 0,
+        "reference_generation": 1
+      },
+      "first_tracking_ok": {
+        "index": 165,
+        "frame_id": 165,
+        "timestamp_ns": 10799213449000,
+        "tracking_state": "OK",
+        "pose_valid": false,
+        "map_epoch": 3,
+        "world_frame_revision": 0,
+        "reference_generation": 1
+      },
+      "first_geometry_valid": {
+        "index": 165,
+        "frame_id": 165,
+        "timestamp_ns": 10799213449000,
+        "tracking_state": "OK",
+        "pose_valid": false,
+        "map_epoch": 3,
+        "world_frame_revision": 0,
+        "reference_generation": 1
+      },
+      "first_quality_passed": {
+        "index": 260,
+        "frame_id": 260,
+        "timestamp_ns": 10802380116000,
+        "tracking_state": "OK",
+        "pose_valid": false,
+        "map_epoch": 6,
+        "world_frame_revision": 0,
+        "reference_generation": 2
+      },
+      "first_visual_release": {
+        "index": 165,
+        "frame_id": 165,
+        "timestamp_ns": 10799213449000,
+        "tracking_state": "OK",
+        "pose_valid": false,
+        "map_epoch": 3,
+        "world_frame_revision": 0,
+        "reference_generation": 1
+      },
+      "first_admitted": {
+        "index": 350,
+        "frame_id": 350,
+        "timestamp_ns": 10805380117000,
+        "tracking_state": "OK",
+        "pose_valid": true,
+        "map_epoch": 1048582,
+        "world_frame_revision": 0,
+        "reference_generation": 0
+      },
+      "first_new_map": null,
+      "identity_transitions": [
+        {
+          "index": 141,
+          "frame_id": 141,
+          "timestamp_ns": 10798413448000,
+          "tracking_state": "RECENTLY_LOST",
+          "pose_valid": false,
+          "map_epoch": 3,
+          "world_frame_revision": 0,
+          "reference_generation": 1,
+          "identity": [
+            3,
+            0,
+            1
+          ]
+        },
+        {
+          "index": 244,
+          "frame_id": 244,
+          "timestamp_ns": 10801846783000,
+          "tracking_state": "RECENTLY_LOST",
+          "pose_valid": false,
+          "map_epoch": 6,
+          "world_frame_revision": 0,
+          "reference_generation": 2,
+          "identity": [
+            6,
+            0,
+            2
+          ]
+        },
+        {
+          "index": 333,
+          "frame_id": 333,
+          "timestamp_ns": 10804813450000,
+          "tracking_state": "NOT_INITIALIZED",
+          "pose_valid": false,
+          "map_epoch": 1048582,
+          "world_frame_revision": 0,
+          "reference_generation": 0,
+          "identity": [
+            1048582,
+            0,
+            0
+          ]
+        }
+      ],
+      "rejection_reasons": {
+        "tracking_unavailable": 101,
+        "stable_window_pending": 50,
+        "independent_visual_requalification_required": 91,
+        "await_visual_requalification": 91,
+        "pose_jump": 2,
+        "imu_initialization_pending": 1
+      },
+      "censored": false,
+      "first_tracking_ok_delay_ms": 800.001,
+      "first_geometry_valid_delay_ms": 800.001,
+      "first_quality_passed_delay_ms": 3966.668,
+      "first_visual_release_delay_ms": 800.001,
+      "loss_to_admission_ms": 6966.669
+    },
+    {
+      "loss_start": {
+        "index": 900,
+        "frame_id": 900,
+        "timestamp_ns": 10823713450000,
+        "tracking_state": "RECENTLY_LOST",
+        "pose_valid": false,
+        "map_epoch": 1048588,
+        "world_frame_revision": 0,
+        "reference_generation": 2
+      },
+      "first_tracking_ok": {
+        "index": 919,
+        "frame_id": 919,
+        "timestamp_ns": 10824346783000,
+        "tracking_state": "OK",
+        "pose_valid": false,
+        "map_epoch": 1048588,
+        "world_frame_revision": 0,
+        "reference_generation": 2
+      },
+      "first_geometry_valid": {
+        "index": 919,
+        "frame_id": 919,
+        "timestamp_ns": 10824346783000,
+        "tracking_state": "OK",
+        "pose_valid": false,
+        "map_epoch": 1048588,
+        "world_frame_revision": 0,
+        "reference_generation": 2
+      },
+      "first_quality_passed": {
+        "index": 934,
+        "frame_id": 934,
+        "timestamp_ns": 10824846783000,
+        "tracking_state": "OK",
+        "pose_valid": true,
+        "map_epoch": 1048588,
+        "world_frame_revision": 0,
+        "reference_generation": 2
+      },
+      "first_visual_release": {
+        "index": 919,
+        "frame_id": 919,
+        "timestamp_ns": 10824346783000,
+        "tracking_state": "OK",
+        "pose_valid": false,
+        "map_epoch": 1048588,
+        "world_frame_revision": 0,
+        "reference_generation": 2
+      },
+      "first_admitted": {
+        "index": 934,
+        "frame_id": 934,
+        "timestamp_ns": 10824846783000,
+        "tracking_state": "OK",
+        "pose_valid": true,
+        "map_epoch": 1048588,
+        "world_frame_revision": 0,
+        "reference_generation": 2
+      },
+      "first_new_map": null,
+      "identity_transitions": [
+        {
+          "index": 900,
+          "frame_id": 900,
+          "timestamp_ns": 10823713450000,
+          "tracking_state": "RECENTLY_LOST",
+          "pose_valid": false,
+          "map_epoch": 1048588,
+          "world_frame_revision": 0,
+          "reference_generation": 2,
+          "identity": [
+            1048588,
+            0,
+            2
+          ]
+        }
+      ],
+      "rejection_reasons": {
+        "tracking_unavailable": 19,
+        "stable_window_pending": 15
+      },
+      "censored": false,
+      "first_tracking_ok_delay_ms": 633.333,
+      "first_geometry_valid_delay_ms": 633.333,
+      "first_quality_passed_delay_ms": 1133.333,
+      "first_visual_release_delay_ms": 633.333,
+      "loss_to_admission_ms": 1133.333
+    }
+  ],
+  "shadow_stability": [
+    {
+      "stable_seconds": 0.0,
+      "shadow_quality_passed_frames": 1075,
+      "baseline_application_admitted_frames": 875,
+      "shadow_earlier_than_baseline_frames": 200,
+      "closed_loop": false,
+      "limitation": "replays recorded raw snapshots through a host-only stability approximation; it does not rerun native VIO or recovery state"
+    },
+    {
+      "stable_seconds": 0.25,
+      "shadow_quality_passed_frames": 1015,
+      "baseline_application_admitted_frames": 875,
+      "shadow_earlier_than_baseline_frames": 140,
+      "closed_loop": false,
+      "limitation": "replays recorded raw snapshots through a host-only stability approximation; it does not rerun native VIO or recovery state"
+    },
+    {
+      "stable_seconds": 0.5,
+      "shadow_quality_passed_frames": 964,
+      "baseline_application_admitted_frames": 875,
+      "shadow_earlier_than_baseline_frames": 94,
+      "closed_loop": false,
+      "limitation": "replays recorded raw snapshots through a host-only stability approximation; it does not rerun native VIO or recovery state"
+    },
+    {
+      "stable_seconds": 1.0,
+      "shadow_quality_passed_frames": 859,
+      "baseline_application_admitted_frames": 875,
+      "shadow_earlier_than_baseline_frames": 77,
+      "closed_loop": false,
+      "limitation": "replays recorded raw snapshots through a host-only stability approximation; it does not rerun native VIO or recovery state"
+    },
+    {
+      "stable_seconds": 1.5,
+      "shadow_quality_passed_frames": 753,
+      "baseline_application_admitted_frames": 875,
+      "shadow_earlier_than_baseline_frames": 62,
+      "closed_loop": false,
+      "limitation": "replays recorded raw snapshots through a host-only stability approximation; it does not rerun native VIO or recovery state"
+    },
+    {
+      "stable_seconds": 2.0,
+      "shadow_quality_passed_frames": 648,
+      "baseline_application_admitted_frames": 875,
+      "shadow_earlier_than_baseline_frames": 41,
+      "closed_loop": false,
+      "limitation": "replays recorded raw snapshots through a host-only stability approximation; it does not rerun native VIO or recovery state"
+    }
+  ],
+  "limitations": [
+    "Recorded poses are evidence of the configured run, not an external accuracy ground truth",
+    "Shadow stability is not a closed-loop A/B result",
+    "Correlated frames inside one recovery episode are not independent samples"
+  ]
+}

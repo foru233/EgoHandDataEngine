@@ -9,19 +9,24 @@ def main(*, on_window=None):
     root=Path(__file__).resolve().parents[1];os.chdir(root);sys.path.insert(0,str(root/'src'));sys.path.insert(0,str(Path(__file__).resolve().parent))
     parser=argparse.ArgumentParser();parser.add_argument('--demo',action='store_true');parser.add_argument('--quit-after',type=float)
     parser.add_argument('--offline-recovery-candidate',action='store_true',help='显式启用隔离离线恢复候选，不改变正式版本')
+    parser.add_argument('--offline-recovery-fast-candidate',action='store_true',help='显式启用0.5秒稳定窗口离线候选，不改变正式版本')
     parser.add_argument('--live-recovery-candidate',action='store_true',help='显式启用 VS030 v4 实时恢复候选，不改变正式版本')
     parser.add_argument('--recording',type=Path);parser.add_argument('--start',action='store_true')
     parser.add_argument('--output-dir',type=Path);parser.add_argument('--exit-when-finished',action='store_true')
     args=parser.parse_args()
     if args.demo and (args.offline_recovery_candidate or args.live_recovery_candidate or args.recording):parser.error('--demo 不能与候选一起使用')
-    if args.offline_recovery_candidate and args.live_recovery_candidate:parser.error('离线候选与实时候选只能选择一个')
+    if (args.offline_recovery_candidate or args.offline_recovery_fast_candidate) and args.live_recovery_candidate:parser.error('离线候选与实时候选只能选择一个')
+    if args.offline_recovery_candidate and args.offline_recovery_fast_candidate:parser.error('两个离线候选只能选择一个')
     if args.live_recovery_candidate and args.recording:parser.error('--live-recovery-candidate 不接受录制回放，请直接连接 VS030')
     if args.start and not (args.recording or args.demo or args.live_recovery_candidate):parser.error('--start 需要 --recording、--demo 或实时候选入口')
     if args.exit_when_finished and not (args.start or args.demo):parser.error('--exit-when-finished 需要自动启动')
     profile=None
-    if args.offline_recovery_candidate:
+    if args.offline_recovery_candidate or args.offline_recovery_fast_candidate:
         from offline_recovery import OfflineRecoveryProfile
-        profile=OfflineRecoveryProfile();profile.configure_process()
+        manifest = (Path(__file__).resolve().parent/'runtime_configs/offline_recovery_fast_candidate.json'
+                    if args.offline_recovery_fast_candidate else None)
+        profile=OfflineRecoveryProfile(manifest=manifest) if manifest else OfflineRecoveryProfile()
+        profile.configure_process()
     live_profile=None
     if args.live_recovery_candidate:
         from egohand.vio.live_recovery import LiveRecoveryProfile
