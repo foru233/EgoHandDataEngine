@@ -27,8 +27,12 @@ def main():
     p.add_argument('--config-snapshot',type=Path)
     p.add_argument('--output',type=Path,required=True)
     p.add_argument('--max-frames',type=int,default=300)
+    p.add_argument('--start-frame',type=int,default=0,
+        help='First decoded frame for a separate temporal consistency window')
     p.add_argument('--stride',type=int,default=2)
     a=p.parse_args()
+    if a.start_frame<0 or a.max_frames<1 or a.stride<1:
+        p.error('start-frame must be nonnegative; max-frames and stride must be positive')
     config=resolve_recording_config(a.config_snapshot or a.recording)
     geometry=config.validate_geometry();scale=config.image_scale
     camera=geometry.rectifier.P1[:3,:3].copy();camera[:2]*=scale
@@ -36,8 +40,8 @@ def main():
     reference=StereoRotationReference(camera,baseline)
     samples=[];reasons=Counter();quality=[]
     for index,frame in enumerate(iter_paired_frames(a.recording)):
-        if index>=a.max_frames:break
-        if index%a.stride:continue
+        if index>=a.start_frame+a.max_frames:break
+        if index<a.start_frame or (index-a.start_frame)%a.stride:continue
         left,right=geometry.rectifier.remap_pair(frame.right_bgr,frame.left_bgr)
         left,right=[cv2.resize(cv2.cvtColor(im,cv2.COLOR_BGR2GRAY),None,
                     fx=scale,fy=scale,interpolation=cv2.INTER_AREA) for im in [left,right]]
@@ -50,8 +54,14 @@ def main():
     if len(samples)<30:
         raise RuntimeError(f'Visual reference unavailable: {len(samples)} pairs; {dict(reasons)}')
     capacity=max(20000,round((samples[-1][1]-samples[0][0])/1e9*480)+4000)
-    buffer=PacketLatticeImuBuffer(sample_rate_hz=480,camera_to_imu_drift_ppm=0,phase_ns=0,capacity=capacity)
+    buffer=PacketLatticeImuBuffer(sample_rate_hz=float(config.timing.get('imu_rate_hz',480)),
+        camera_to_imu_drift_ppm=float(config.timing.get('camera_to_imu_drift_ppm',0)),
+        phase_ns=0,capacity=capacity)
     for packet in iter_imu_packets(a.recording):
+        # Keep a bounded diagnostic window while decoding preceding packets.
+        # add() still checks packet/header continuity; no samples are invented.
+        while buffer.rows and buffer.rows[0][0]<samples[0][0]-500_000_000:
+            buffer.rows.popleft()
         buffer.add(packet.payload,packet.device_ts)
         if packet.device_ts*1000>samples[-1][1]+250_000_000:break
     times=np.array([r[0] for r in buffer.rows],dtype=np.int64)
@@ -70,13 +80,15 @@ def main():
     selected=min(fine,key=lambda x:x['residual']['rms_deg'])
     verification=verify_session_phase(samples,times,gyro,camera_from_body)
     report={'recording':str(a.recording.resolve()),'config':config.describe(),
+            'frame_window':{'start':a.start_frame,'maximum_count':a.max_frames,'stride':a.stride},
             'method':'independent short-baseline stereo LK/PnP; no SLAM map or IMU pose predictions',
             'pairs':len(samples),'visual_reasons':dict(reasons),'selected':selected,
             'verification':verification,
             'coarse':coarse,'fine':fine,'quality':quality,
             'limitations':['Diagnostic candidate, not physical exposure truth or a runtime confidence certificate.']}
     a.output.parent.mkdir(parents=True,exist_ok=True)
-    a.output.write_text(json.dumps(report,indent=2),encoding='utf8')
+    with a.output.open('x',encoding='utf8') as output:
+        output.write(json.dumps(report,indent=2))
     print(json.dumps({'recording':str(a.recording),'pairs':len(samples),'selected':selected,'reasons':dict(reasons)}))
 
 

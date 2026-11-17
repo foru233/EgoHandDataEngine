@@ -45,7 +45,8 @@ class LiveLocalizationHandJoin:
     A recorder attachment is opaque and is returned with its original result;
     callers must flush before closing or pausing that recorder.
     """
-    def __init__(self, calibration, *, source_session_id, max_pending=32, max_wait_s=2., clock=time.monotonic):
+    def __init__(self, calibration, *, source_session_id, max_pending=32, max_wait_s=2., clock=time.monotonic,
+                 on_exact_pair=None):
         if (not isinstance(source_session_id, str) or len(source_session_id) != 32
                 or any(c not in '0123456789abcdef' for c in source_session_id)):
             raise ValueError('invalid live source session')
@@ -55,6 +56,9 @@ class LiveLocalizationHandJoin:
         self.calibration_id = calibration.calibration_id
         self.source_session_id = source_session_id
         self.max_pending, self.max_wait_s, self.clock = max_pending, max_wait_s, clock
+        if on_exact_pair is not None and not callable(on_exact_pair):
+            raise ValueError('exact-pair callback must be callable')
+        self.on_exact_pair = on_exact_pair
         self.pending, self.poses = OrderedDict(), OrderedDict()
         self.last_hand_frame = -1
         self.config_fingerprint = None
@@ -113,6 +117,24 @@ class LiveLocalizationHandJoin:
             response['reason'] = reason
         return response
 
+    def _finalize(self, result, binding, pose, reason=None):
+        world = self._world(result, binding, pose, reason=reason)
+        diagnostics = {**result.diagnostics, 'live_world_join_finalized': True}
+        if pose is not None:
+            diagnostics['live_vio_pose'] = copy.deepcopy(pose)
+        finalized = replace(result, world_hands=world, diagnostics=diagnostics)
+        from .local_segments import segment_hands_for_result
+        finalized.local_motion=copy.deepcopy(pose.get('local_motion')) if pose is not None else None
+        finalized.segment_hands=segment_hands_for_result(finalized,pose,world)
+        return finalized
+
+    def _publish_exact_pair(self, key):
+        # Preview may consume a completed capture while an earlier unmatched
+        # result waits for the ordered recorder. Both use the same validation.
+        if self.on_exact_pair is not None and key in self.pending and key in self.poses:
+            result, binding, _attachment, _offered = self.pending[key]
+            self.on_exact_pair(copy.deepcopy(self._finalize(result,binding,self.poses[key])))
+
     def _release(self, *, force_reason=None):
         output = []
         now = self.clock()
@@ -129,13 +151,8 @@ class LiveLocalizationHandJoin:
             self.poses.pop(key, None)
             # An already paired frame is valid even when another pending frame
             # forces a flush. No result is mutated after submission to the writer.
-            world = self._world(result, binding, pose, reason=None if pose is not None else reason)
-            finalized = replace(result, world_hands=world,
-                                diagnostics={**result.diagnostics, 'live_world_join_finalized': True})
-            from .local_segments import segment_hands_for_result
-            finalized.local_motion=copy.deepcopy(pose.get('local_motion')) if pose is not None else None
-            finalized.segment_hands=segment_hands_for_result(finalized,pose,world)
-            self.stats['matched' if world['status'] in ('available', 'no_valid_hand_joints') else 'unavailable'] += 1
+            finalized = self._finalize(result,binding,pose,reason=None if pose is not None else reason)
+            self.stats['matched' if finalized.world_hands['status'] in ('available', 'no_valid_hand_joints') else 'unavailable'] += 1
             output.append((finalized, attachment))
         return output
 
@@ -167,6 +184,7 @@ class LiveLocalizationHandJoin:
             return self._release()
         self.config_fingerprint = config['fingerprint']
         self.poses[key] = copy.deepcopy(pose)
+        self._publish_exact_pair(key)
         while len(self.poses) > self.max_pending:
             self.poses.popitem(last=False)
             self.stats['pose_evicted'] += 1
@@ -210,6 +228,7 @@ class LiveLocalizationHandJoin:
                                   reason='localization_join_capacity')), old_attachment))
             self.stats['unavailable'] += 1
         self.pending[key] = (copy.deepcopy(result), binding, attachment, self.clock())
+        self._publish_exact_pair(key)
         return output + self._release()
 
     def drain(self):

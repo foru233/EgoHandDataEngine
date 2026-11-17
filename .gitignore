@@ -71,6 +71,7 @@ pytest.xml
 models/*.task
 models/*.onnx
 models/mano/
+models/smpl/
 src/**/native/bin/
 *.pdb
 *.dll

@@ -7,6 +7,7 @@ def create_worker(source, *, parent=None, callbacks=None, worker_class=None, **o
     """Construct and bind before starting; preserves direct Qt sender identity."""
     worker = (worker_class or PipelineWorker)(source, parent=parent, **options)
     for name, callback in (callbacks or {}).items():
+        if name=='localized_hand_result' and not hasattr(worker,name):continue
         getattr(worker, name).connect(callback)
     return worker
 
@@ -19,6 +20,7 @@ def stop_worker(worker, timeout_ms=15000):
 
 
 class SessionController(QObject):
+    localized_hand_result = Signal(object)
     ready = Signal(dict)
     error = Signal(str)
     startup_status = Signal(str)
@@ -39,6 +41,7 @@ class SessionController(QObject):
             'ready': self._ready, 'error': self._error,
             'startup_status': self._startup_status, 'vio_status': self._vio_status,
             'recording_state_changed': self._recording_state,
+            'localized_hand_result': self._localized_hands,
             'finished': self._finished,
         }, **options)
         self.worker.start()
@@ -66,6 +69,10 @@ class SessionController(QObject):
     @Slot(bool, bool, str)
     def _recording_state(self, active, paused, message):
         if self._current(): self.recording_state_changed.emit(active, paused, message)
+
+    @Slot(object)
+    def _localized_hands(self, value):
+        if self._current(): self.localized_hand_result.emit(value)
 
     @Slot()
     def _finished(self):

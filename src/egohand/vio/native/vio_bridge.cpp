@@ -1,4 +1,5 @@
 #include "vio_bridge.h"
+#include "vio_reference_snapshot.h"
 #include <cstddef>
 #include <VioCommitDiagnostics.h>
 #include <System.h>
@@ -7,6 +8,8 @@
 #include <VioDepthGate.h>
 #include <VioEntryPrune.h>
 #include <VioCheiralityGuard.h>
+#include <ShortRecovery.h>
+#include <fstream>
 #include <opencv2/core.hpp>
 #include <algorithm>
 #include <cmath>
@@ -132,6 +135,7 @@ int EGOHAND_VIO_CALL egohand_vio_get_map_appearance(void* opaque,uint64_t expect
 }
 
 int32_t EGOHAND_VIO_CALL egohand_vio_snapshot_size() { return (int32_t)sizeof(EgohandVioFrameSnapshot); }
+int32_t EGOHAND_VIO_CALL egohand_vio_reference_frame_size() { return (int32_t)sizeof(EgohandVioReferenceFrame); }
 int32_t EGOHAND_VIO_CALL egohand_vio_map_event_frame_size() { return (int32_t)sizeof(EgohandVioMapEventFrame); }
 uint64_t EGOHAND_VIO_CALL egohand_vio_entry_pruned() {
     return ORB_SLAM3::EntryPruneCounter();
@@ -150,21 +154,11 @@ int32_t EGOHAND_VIO_CALL egohand_vio_world_frame_info_size() { return (int32_t)s
 /* Additive tokens only: existing names keep their meaning and new ones are appended,
    so a caller can probe for optional features instead of sniffing the version string. */
 const char* EGOHAND_VIO_CALL egohand_vio_capabilities() {
-    return "map_appearance_v1;result;snapshot;body_state;recovery_callback;short_recovery_report;start_new_map;world_frame_revision;cheirality_guard;partial_map_event_frame_v1";
+    return "map_appearance_v1;result;snapshot;body_state;recovery_callback;short_recovery_report;start_new_map;world_frame_revision;cheirality_guard;partial_map_event_frame_v1;inertial_reference_frame_v1";
 }
 
-/*
- * ABI marker for the experimental short-recovery path.
- *
- * This bridge does not yet expose an independent native stereo/map geometry
- * solver.  Returning enabled=false is intentional: the Python coordinator
- * can run the transaction and keep every candidate quarantined, while the
- * worker still rejects any attempt to treat IMU prediction as visual proof.
- * A future solver must replace this with a frame-bound, identity-checked
- * report matching short_recovery.py's native_stereo_map_geometry_v1 schema.
- */
 const char* EGOHAND_VIO_CALL egohand_vio_short_recovery_report() {
-    return "{\"enabled\":false,\"available\":false,\"qualified\":false,\"reason\":\"native_geometry_solver_unavailable\"}";
+    return ORB_SLAM3::ShortRecovery::Json().c_str();
 }
 
 int EGOHAND_VIO_CALL egohand_vio_get_map_event_frame(void* opaque, EgohandVioMapEventFrame* out, int32_t out_size) {
@@ -175,7 +169,10 @@ int EGOHAND_VIO_CALL egohand_vio_get_map_event_frame(void* opaque, EgohandVioMap
     auto* h=static_cast<VioHandle*>(opaque); std::lock_guard<std::mutex> lock(h->mutex);
     if(h->shutdown||!h->system) { set_error("ORB-SLAM3 is shut down"); return -1; }
     const auto& s=h->last_snapshot;
-    if(!s.available || !h->has_last_frame) return 1;
+    if(!s.available || !h->has_last_frame ||
+       s.timestamp_sec!=seconds_from_epoch(h->last_frame_ns,h->epoch_ns) ||
+       !s.consistent || !s.geometry_commit_state ||
+       !s.geometry_commit_state->Stable(s.geometry_commit_sequence)) return 1;
     *out={}; out->schema_version=1; out->struct_size=sizeof(*out);
     out->frame_id=s.frame_id; out->map_id=s.map_id; out->reset_id=s.reset_generation;
     // The integer is the original bridge request, never reconstructed from seconds.
@@ -257,6 +254,29 @@ int EGOHAND_VIO_CALL egohand_vio_get_frame_snapshot(void* opaque, EgohandVioFram
     // Recheck after copying scalar/value fields too. No map pointer or map lock is needed.
     if (s.geometry_commit_state && !s.geometry_commit_state->Stable(s.geometry_commit_sequence))
         out->snapshot_consistent=out->pose_valid=out->body_valid=0;
+    return 0;
+}
+
+int EGOHAND_VIO_CALL egohand_vio_get_reference_frame(void* opaque, EgohandVioReferenceFrame* out, int32_t out_size) {
+    clear_error();
+    if(!opaque || !out || out_size != sizeof(EgohandVioReferenceFrame)) {
+        set_error("reference frame size mismatch or null argument"); return -1;
+    }
+    auto* h=static_cast<VioHandle*>(opaque); std::lock_guard<std::mutex> lock(h->mutex);
+    if(h->shutdown || !h->system) { set_error("ORB-SLAM3 is shut down"); return -1; }
+    const auto& s=h->last_snapshot;
+    if(!h->has_last_frame || !h->has_epoch ||
+       !EgohandStableReferenceSnapshot(s,seconds_from_epoch(h->last_frame_ns,h->epoch_ns))) return 1;
+    *out={}; out->schema_version=1; out->struct_size=sizeof(EgohandVioReferenceFrame);
+    out->frame_id=s.frame_id; out->map_id=s.map_id; out->reset_id=s.reset_generation;
+    out->atlas_generation=s.atlas_generation;
+    out->generation=s.inertial_reference_generation; out->operation_sequence=s.inertial_reference_operation;
+    out->geometry_sequence=s.geometry_commit_sequence; out->map_revision=s.big_change_revision;
+    out->map_change_index=s.map_change_index; out->timestamp_ns=h->last_frame_ns;
+    out->snapshot_consistent=s.consistent; out->frame_bound=s.consistent;
+    if(!EgohandStableReferenceSnapshot(s,seconds_from_epoch(h->last_frame_ns,h->epoch_ns))) {
+        out->snapshot_consistent=out->frame_bound=0;return 1;
+    }
     return 0;
 }
 
@@ -419,6 +439,18 @@ int EGOHAND_VIO_CALL egohand_vio_track_stereo(
         }
         h->system->GetTrackingFrameSnapshot(h->last_snapshot);
         const auto& snapshot=h->last_snapshot;
+        // Opt-in diagnosis also records feature-disabled controls. Geometry
+        // admission continues to depend on SHORT_RECOVERY, never this trace.
+        if(const char* tracePath=std::getenv("EGOHAND_NATIVE_STAGE_TRACE")) {
+            std::ofstream trace(tracePath,std::ios::app);
+            trace << "{\"timestamp_ns\":" << frame_ns << ",\"frame_id\":" << snapshot.frame_id
+                  << ",\"tracking_state\":" << snapshot.tracking_state
+                  << ",\"imu_initialized\":" << (snapshot.imu_initialized?"true":"false")
+                  << ",\"ba2_complete\":" << (snapshot.ba2_complete?"true":"false")
+                  << ",\"map_id\":" << snapshot.map_id << ",\"reset_id\":" << snapshot.reset_generation
+                  << ",\"map_revision\":" << snapshot.big_change_revision
+                  << ",\"stages\":" << ORB_SLAM3::ShortRecovery::Json() << "}\n";
+        }
         ORB_SLAM3::VioCommitDiagnostics::BridgeIdentity(snapshot,frame_ns,h->epoch_ns);
         out->tracking_state=snapshot.tracking_state;
         out->is_lost=snapshot.tracking_state==4?1:0;

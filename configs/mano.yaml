@@ -8,5 +8,5 @@ pose_prior_weight: 0.00001
 shape_prior_weight: 0.00002
 temporal_weight: 0.00001
 temporal_max_frame_gap: 8
-python: E:/yolo/envs/ultralytics-8.4.174/python.exe  # 已有 PyTorch 环境；MANO 依赖从项目 tools/mano_deps 加载。
+python: C:/Users/admin/miniconda3/envs/yolo/python.exe  # 已有 PyTorch 环境；MANO 依赖从项目 tools/mano_deps 加载。
 models: models/mano

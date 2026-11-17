@@ -1,3 +1,4 @@
+from .stereo_transport import StereoReader, SHARED_STEREO, MAX_DESCRIPTOR, CAPABILITY
 """隔离运行 ORB-SLAM3；TCP 仅监听本机，数据为未压缩校正图和 IMU。"""
 import json
 import os
@@ -54,8 +55,11 @@ def serve(sock, bridge, map_output=None, *, recovery_enabled=None, recovery_prot
     else:coordinator=None
     coordinated=coordinator is not None and recovery_protocol==PROTOCOL
     send(sock,{'type':'ready','recovery_protocol':PROTOCOL if coordinated else 1 if coordinator else 0,
-               'recovery_owner':'RecoveryCoordinator' if coordinated else 'legacy'})
+               'recovery_owner':'RecoveryCoordinator' if coordinated else 'legacy',
+               'stereo_transports':[CAPABILITY] if coordinated else []})
     current_stamp=[None]
+    shared_reader=StereoReader()
+    left=right=None
     if coordinator is not None:
         def check_candidate(T,epoch):
             geometry=bridge.get_short_recovery_report() if coordinator.short_recovery else None
@@ -83,13 +87,20 @@ def serve(sock, bridge, map_output=None, *, recovery_enabled=None, recovery_prot
             send(sock,{'type':'exported'})
             return
         if w<=0 or h<=0 or w*h>1600*1200 or n>10000:raise ValueError(f'图像尺寸或 IMU 数量异常：{w}x{h} n={n}')
+        left=right=None
+        flags=0
         if coordinated:
             flags=FRAME_CONTEXT.unpack(receive(sock,FRAME_CONTEXT.size))[0]
-            if flags & ~RESET_IMU_ALIGNMENT:raise RecoveryProtocolError('unknown frame context flags')
+            if flags & ~(RESET_IMU_ALIGNMENT|SHARED_STEREO):raise RecoveryProtocolError('unknown frame context flags')
             if flags & RESET_IMU_ALIGNMENT:coordinator.reset_imu_alignment()
         pixels=w*h
-        left=np.frombuffer(receive(sock,pixels),dtype=np.uint8).reshape(h,w)
-        right=np.frombuffer(receive(sock,pixels),dtype=np.uint8).reshape(h,w)
+        if flags & SHARED_STEREO:
+            length=struct.unpack('<I',receive(sock,4))[0]
+            if not 0<length<=MAX_DESCRIPTOR:raise RecoveryProtocolError('invalid shared stereo descriptor size')
+            left,right=shared_reader.read(receive(sock,length),w,h)
+        else:
+            left=np.frombuffer(receive(sock,pixels),dtype=np.uint8).reshape(h,w)
+            right=np.frombuffer(receive(sock,pixels),dtype=np.uint8).reshape(h,w)
         raw=receive(sock,n*IMU.size)
         imu=[ImuMeasurement(row[0],tuple(row[1:4]),tuple(row[4:7])) for row in IMU.iter_unpack(raw)]
         if coordinator is not None:
@@ -109,6 +120,7 @@ def serve(sock, bridge, map_output=None, *, recovery_enabled=None, recovery_prot
         if body is not None:
             body={k:(v.tolist() if isinstance(v,np.ndarray) else v) for k,v in body.items()}
         response={'type':'pose','timestamp_ns':stamp,'tracking_state':result.tracking_state_name,
+            'image_transport':'shared_memory_v1' if flags & SHARED_STEREO else 'tcp',
             'pose_valid':result.pose_valid,'imu_initialized':result.imu_initialized,
             'inertial_scale_finalized':result.inertial_scale_finalized,
             'map_epoch':result.map_epoch,
@@ -151,6 +163,8 @@ def serve(sock, bridge, map_output=None, *, recovery_enabled=None, recovery_prot
                 print('Unverified old reference abandoned: scheduled an independent new map',flush=True)
             send(sock,{'type':'recovery_committed','recovery_preaccept':committed})
     finally:
+        left=right=None
+        shared_reader.close()
         if coordinator is not None:bridge.set_recovery_callback(None)
 
 

@@ -1,7 +1,8 @@
 """Native Studio workspace composition. Processing stays in PipelineWorker."""
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction,QKeySequence
-from PySide6.QtWidgets import QWidget,QFrame,QVBoxLayout,QHBoxLayout,QGridLayout,QLabel,QSplitter,QScrollArea,QTabWidget,QMenu,QToolButton,QComboBox,QSizePolicy,QStackedWidget,QGroupBox
+import math
+from PySide6.QtCore import Qt,QTimer
+from PySide6.QtGui import QAction,QKeySequence,QColor,QPainter,QLinearGradient
+from PySide6.QtWidgets import QWidget,QFrame,QVBoxLayout,QHBoxLayout,QGridLayout,QLabel,QSplitter,QScrollArea,QTabWidget,QMenu,QToolButton,QComboBox,QSizePolicy,QStackedWidget,QGroupBox,QGraphicsOpacityEffect
 from .components import label,badge,button,StatCard,ViewportCard,HandReadout
 from .icons import icon
 from .theme import THEMES,stylesheet
@@ -13,6 +14,45 @@ from .adaptive_views import AdaptiveViews
 from ..visualization.image_view import ImageView
 from ..visualization.skeleton_view import SkeletonView
 from .shared.presentation import session_state
+
+class MotionRail(QWidget):
+    """A small, low-cost ambient signal rail controlled by the motion switch."""
+    def __init__(self,parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(6)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self._phase=0.35
+        self._active=True
+        self._background=QColor("#0E141D")
+        self._accent=QColor("#5FE0C5")
+
+    def set_theme(self,tokens):
+        self._background=QColor(tokens["canvas"])
+        self._accent=QColor(tokens["accent"])
+        self.update()
+
+    def set_active(self,active):
+        self._active=bool(active)
+        self.update()
+
+    def advance(self):
+        if not self._active:return
+        self._phase=(self._phase+0.012)%1.0
+        self.update()
+
+    def paintEvent(self,event):
+        painter=QPainter(self)
+        painter.fillRect(self.rect(),self._background)
+        if not self._active:return
+        width=max(1,self.width())
+        center=int((self._phase*1.35-0.15)*width)
+        gradient=QLinearGradient(center-150,0,center+150,0)
+        glow=QColor(self._accent);glow.setAlpha(0)
+        edge=QColor(self._accent);edge.setAlpha(90)
+        core=QColor(self._accent);core.setAlpha(245)
+        gradient.setColorAt(0.0,glow);gradient.setColorAt(0.38,edge)
+        gradient.setColorAt(0.5,core);gradient.setColorAt(0.62,edge);gradient.setColorAt(1.0,glow)
+        painter.fillRect(self.rect(),gradient)
 
 def build_workspace(w):
     root=QWidget();root.setObjectName("applicationRoot")
@@ -26,23 +66,51 @@ def build_workspace(w):
     w.state_badge=badge("就绪");h.addWidget(w.provenance_badge);h.addWidget(w.state_badge)
     w.settings_button=button("配置",lambda:None,"layers","ghost","展开 / 收起工作配置")
     w.settings_button.setCheckable(True);w.settings_button.setChecked(True);h.addWidget(w.settings_button)
+    w.motion_toggle=QToolButton();w.motion_toggle.setText("动效");w.motion_toggle.setCheckable(True);w.motion_toggle.setChecked(True)
+    w.motion_toggle.setToolTip("开启 / 关闭品牌呼吸动效");w.motion_toggle.setAccessibleName("界面动效")
+    w.motion_toggle.setCursor(Qt.PointingHandCursor);h.addWidget(w.motion_toggle)
     w.theme=QComboBox();w.theme.addItems(["深色","浅色"]);w.theme.setAccessibleName("界面主题");w.theme.setFixedWidth(88)
     h.addWidget(w.theme);layout.addWidget(header)
+    w.motion_rail=MotionRail();layout.addWidget(w.motion_rail)
     content=QWidget();v=QVBoxLayout(content);v.setContentsMargins(16,10,16,8);v.setSpacing(10)
-    command=QFrame();command.setObjectName("commandBar");c=QHBoxLayout(command);c.setContentsMargins(14,10,14,10);c.setSpacing(8)
+    command=QFrame();command.setObjectName("commandBar");c=QHBoxLayout(command);c.setContentsMargins(10,10,10,10);c.setSpacing(8)
+
+    def command_section(title, eyebrow):
+        section=QFrame();section.setObjectName("commandSection")
+        section_layout=QVBoxLayout(section);section_layout.setContentsMargins(11,7,11,7);section_layout.setSpacing(5)
+        heading=QHBoxLayout();heading.setContentsMargins(0,0,0,0);heading.setSpacing(7)
+        heading.addWidget(label(eyebrow,name="commandEyebrow"));heading.addWidget(label(title,name="commandTitle"));heading.addStretch()
+        section_layout.addLayout(heading)
+        row=QHBoxLayout();row.setContentsMargins(0,0,0,0);row.setSpacing(6);section_layout.addLayout(row)
+        return section,row
+
+    def command_divider():
+        divider=QFrame();divider.setObjectName("commandDivider");divider.setFixedWidth(1);return divider
+
     w.source_panel=SourcePanel()
-    c.addWidget(label("数据源","muted"));w.source_panel.kind.setMinimumWidth(170);c.addWidget(w.source_panel.kind)
-    w.browse_button=button("打开数据",w.browse_source,"folder","ghost");c.addWidget(w.browse_button)
-    c.addStretch()
-    w.start_button=button("开始采集",w.start_pipeline,"play","primary","开始采集 / 重新处理  ·  Ctrl+Enter");w.start_button.setMinimumWidth(112)
+    source_section,source_row=command_section("数据源","INPUT")
+    w.source_panel.kind.setMinimumWidth(174);source_row.addWidget(w.source_panel.kind)
+    w.browse_button=button("打开数据",w.browse_source,"folder","ghost");source_row.addWidget(w.browse_button)
+    c.addWidget(source_section,2)
+    c.addWidget(command_divider())
+
+    runtime_section,runtime_row=command_section("运行控制","SESSION")
+    w.start_button=button("开始采集",w.start_pipeline,"play","primary","开始采集 / 重新处理  ·  Ctrl+Enter");w.start_button.setMinimumWidth(118)
     w.pause_button=button("",w.toggle_pause,"pause",tooltip="暂停 / 继续  ·  Space");w.pause_button.setFixedWidth(42)
     w.stop_button=button("",w.request_pipeline_stop,"stop",tooltip="停止处理");w.stop_button.setFixedWidth(42)
-    c.addWidget(w.start_button);c.addWidget(w.pause_button);c.addWidget(w.stop_button)
+    runtime_row.addWidget(w.start_button);runtime_row.addWidget(w.pause_button);runtime_row.addWidget(w.stop_button)
+    c.addWidget(runtime_section,1)
+    c.addWidget(command_divider())
+
+    output_section,output_row=command_section("结果输出","OUTPUT")
     w.export_button=QToolButton();w.export_button.setText("导出");w.export_button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon);w.export_button.setIcon(icon("export"));w.export_button.setProperty("icon_name","export")
     w.export_button.setAccessibleName("导出结果和截图");w.export_button.setCursor(Qt.PointingHandCursor);w.export_button.setMinimumHeight(38)
     menu=QMenu(w.export_button)
     menu.addAction("导出当前帧",w.export_current);menu.addAction("导出缓存 / 已有结果",w.export_results)
-    w.export_button.setMenu(menu);w.export_button.setPopupMode(QToolButton.InstantPopup);c.addWidget(w.export_button)
+    w.export_button.setMenu(menu);w.export_button.setPopupMode(QToolButton.InstantPopup);output_row.addWidget(w.export_button)
+    w.results_button=button("回看结果",w.open_results,"frame","ghost","打开已保存的结果")
+    output_row.addWidget(w.results_button)
+    c.addWidget(output_section,1)
     v.addWidget(command)
     metric_strip=QFrame();metric_strip.setObjectName("metricStrip")
     kpis=QHBoxLayout(metric_strip);kpis.setContentsMargins(0,0,0,0);kpis.setSpacing(0)
@@ -185,6 +253,16 @@ def build_workspace(w):
     layout.addWidget(content,1);w.setCentralWidget(root)
     w.statusBar().showMessage("就绪  ·  EgoHand Studio")
     w.statusBar().addPermanentWidget(label("相机坐标 · 米   |   CPU","hint"))
+    motion_effect=QGraphicsOpacityEffect(w.brand_mark);w.brand_mark.setGraphicsEffect(motion_effect)
+    w._motion_phase=0.0;w._motion_effect=motion_effect
+    w.motion_timer=QTimer(w);w.motion_timer.setInterval(70)
+    def animate_motion():
+        w._motion_phase=(w._motion_phase+0.16)%(math.tau)
+        motion_effect.setOpacity(0.88+0.12*(0.5+0.5*math.sin(w._motion_phase)))
+        w.motion_rail.advance()
+    w.motion_timer.timeout.connect(animate_motion)
+    w.motion_toggle.toggled.connect(lambda enabled:(w.motion_timer.start() if enabled else w.motion_timer.stop(), motion_effect.setOpacity(1.0), w.motion_rail.set_active(enabled)))
+    if w.motion_toggle.isChecked():w.motion_timer.start()
     if w.width()<1250:w.settings_button.setChecked(False)
     w.theme.currentIndexChanged.connect(lambda index:apply_theme(w,"light" if index else "dark"))
     w.source_panel.kind.currentIndexChanged.connect(w.source_changed)
@@ -198,6 +276,7 @@ def apply_theme(w,name):
     w.theme_name=name;t=THEMES[name]
     w.setStyleSheet(stylesheet(name))
     w.brand_mark.setPixmap(icon("logo",t["accent"],35).pixmap(35,35))
+    w.motion_rail.set_theme(t)
     for b in w.findChildren(__import__('PySide6.QtWidgets',fromlist=['QAbstractButton']).QAbstractButton):
         key=b.property("icon_name")
         if key:b.setIcon(icon(key,t["on_accent"] if b.property("role")=="primary" else t["text"]))

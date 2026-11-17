@@ -279,3 +279,88 @@ def test_startup_step_legacy_policy_is_unchanged():
     run(frame(1_000_000_000))
     jumped=run(frame(1_010_000_000,x=4))
     assert jumped['jump_detected'] and not jumped['pose_valid'] and c.quarantined
+
+
+def test_prediction_expiry_retires_anchor_but_valid_geometry_can_recover():
+    c,p,run=system(timeout=5)
+    assert run(frame(1_000_000_000))['pose_valid']
+    for t in range(1_010_000_000,3_040_000_000,10_000_000):
+        lost=run(frame(t,state='RECENTLY_LOST'))
+        assert not lost['pose_valid'] and consumer_map_pose(lost,world_hands=True) is None
+    assert c.predictor.anchor is None and c.invalid_reason is None
+    assert lost['recovery_preaccept']['loss_prediction']['status']=='unavailable'
+    assert not run(frame(3_040_000_000))['pose_valid']
+    recovered=run(frame(3_050_000_000,geometry=True))
+    release=recovered['recovery_preaccept']['visual_release']
+    assert release['motion_check']['status']=='unavailable'
+    assert recovered['pose_valid'] and not c.quarantined
+    assert c.predictor.anchor.timestamp_ns==3_050_000_000
+
+
+def test_prediction_expiry_legacy_policy_preserves_fault_and_anchor():
+    c,p,run=system(short=False,timeout=5)
+    run(frame(1_000_000_000))
+    for t in range(1_010_000_000,3_040_000_000,10_000_000):
+        run(frame(t,state='LOST'))
+    assert c.predictor.anchor is not None
+    assert c.invalid_reason=='预测区间超过上限'
+    recovered=run(frame(3_050_000_000,geometry=True))
+    assert not recovered['pose_valid'] and c.quarantined
+    assert consumer_map_pose(recovered,world_hands=True) is None
+
+
+@pytest.mark.parametrize('fault',['gap','non_monotonic','identity','pose_jump','stale_geometry'])
+def test_expiry_fix_never_bypasses_data_identity_or_jump_failures(fault):
+    c,p,run=system(timeout=5)
+    run(frame(1_000_000_000))
+    for t in range(1_010_000_000,3_040_000_000,10_000_000):run(frame(t,state='LOST'))
+    if fault=='gap':
+        # A new inertial anchor must first be established before its gap can
+        # be evaluated; expiry itself must never synthesize an IMU interval.
+        run(frame(3_040_000_000,geometry=True))
+        run(frame(3_080_000_000,state='LOST'))
+    elif fault=='non_monotonic':
+        c.begin_frame([ImuMeasurement(3_020_000_000,(0,0,9.81),(0,0,0))])
+    elif fault=='pose_jump':
+        run(frame(3_040_000_000,x=4))
+    r=frame(3_100_000_000,geometry=True)
+    if fault=='identity':
+        r['reference_frame']['frame_id']=0
+    elif fault=='stale_geometry':
+        r['recovery_observation']['frame_id']=0
+    result=run(r)
+    assert not result['pose_valid'] and c.quarantined
+    assert consumer_map_pose(result,world_hands=True) is None
+
+
+@pytest.mark.parametrize('fault', ['gap', 'non_monotonic'])
+def test_prediction_expiry_does_not_erase_preexisting_sensor_failure(fault):
+    c,p,run=system(timeout=5)
+    run(frame(1_000_000_000))
+    run(frame(1_010_000_000,state='LOST'))
+    if fault=='non_monotonic':
+        c.begin_frame([ImuMeasurement(1_005_000_000,(0,0,9.81),(0,0,0))])
+    # The 40 ms hole is invalid under the existing 20 ms rule.
+    run(frame(1_050_000_000,state='LOST'))
+    assert c.invalid_reason is not None
+    for t in range(1_060_000_000,3_050_000_000,10_000_000):
+        run(frame(t,state='LOST'))
+    assert c.predictor.anchor is None and c.invalid_reason is not None
+    recovered=run(frame(3_050_000_000,geometry=True))
+    assert not recovered['pose_valid'] and c.quarantined
+    assert recovered['recovery_preaccept']['visual_release'] is None
+
+
+def test_expired_prediction_geometry_still_requires_full_application_stability():
+    c,p,run=system(stable=.1,timeout=5)
+    for t in range(1_000_000_000,1_120_000_000,10_000_000):
+        ready=run(frame(t))
+    assert ready['pose_valid']
+    for t in range(1_120_000_000,3_150_000_000,10_000_000):
+        run(frame(t,state='LOST'))
+    recovered=run(frame(3_150_000_000,geometry=True))
+    assert not c.quarantined and not recovered['pose_valid']
+    assert recovered['quality_gate']['reason_code']=='stable_window_pending'
+    for t in range(3_160_000_000,3_270_000_000,10_000_000):
+        ready=run(frame(t,geometry=True))
+    assert ready['pose_valid']

@@ -8,22 +8,25 @@ from pathlib import Path
 def main(*, on_window=None):
     root=Path(__file__).resolve().parents[1];os.chdir(root);sys.path.insert(0,str(root/'src'));sys.path.insert(0,str(Path(__file__).resolve().parent))
     parser=argparse.ArgumentParser();parser.add_argument('--demo',action='store_true');parser.add_argument('--quit-after',type=float)
+    parser.add_argument('--open-results',type=Path)
     parser.add_argument('--offline-recovery-candidate',action='store_true',help='显式启用隔离离线恢复候选，不改变正式版本')
     parser.add_argument('--offline-recovery-fast-candidate',action='store_true',help='显式启用0.5秒稳定窗口离线候选，不改变正式版本')
+    parser.add_argument('--offline-recovery-profile',type=Path,help='显式载入经哈希校验的隔离离线候选清单')
     parser.add_argument('--live-recovery-candidate',action='store_true',help='显式启用 VS030 v4 实时恢复候选，不改变正式版本')
     parser.add_argument('--recording',type=Path);parser.add_argument('--start',action='store_true')
     parser.add_argument('--output-dir',type=Path);parser.add_argument('--exit-when-finished',action='store_true')
     args=parser.parse_args()
-    if args.demo and (args.offline_recovery_candidate or args.live_recovery_candidate or args.recording):parser.error('--demo 不能与候选一起使用')
-    if (args.offline_recovery_candidate or args.offline_recovery_fast_candidate) and args.live_recovery_candidate:parser.error('离线候选与实时候选只能选择一个')
-    if args.offline_recovery_candidate and args.offline_recovery_fast_candidate:parser.error('两个离线候选只能选择一个')
+    offline_choices=sum(bool(v) for v in (args.offline_recovery_candidate,args.offline_recovery_fast_candidate,args.offline_recovery_profile))
+    if args.demo and (offline_choices or args.live_recovery_candidate or args.recording):parser.error('--demo 不能与候选一起使用')
+    if offline_choices and args.live_recovery_candidate:parser.error('离线候选与实时候选只能选择一个')
+    if offline_choices>1:parser.error('离线候选只能选择一个')
     if args.live_recovery_candidate and args.recording:parser.error('--live-recovery-candidate 不接受录制回放，请直接连接 VS030')
     if args.start and not (args.recording or args.demo or args.live_recovery_candidate):parser.error('--start 需要 --recording、--demo 或实时候选入口')
     if args.exit_when_finished and not (args.start or args.demo):parser.error('--exit-when-finished 需要自动启动')
     profile=None
-    if args.offline_recovery_candidate or args.offline_recovery_fast_candidate:
+    if offline_choices:
         from offline_recovery import OfflineRecoveryProfile
-        manifest = (Path(__file__).resolve().parent/'runtime_configs/offline_recovery_fast_candidate.json'
+        manifest = args.offline_recovery_profile or (Path(__file__).resolve().parent/'runtime_configs/offline_recovery_fast_candidate.json'
                     if args.offline_recovery_fast_candidate else None)
         profile=OfflineRecoveryProfile(manifest=manifest) if manifest else OfflineRecoveryProfile()
         profile.configure_process()
@@ -46,6 +49,7 @@ def main(*, on_window=None):
     print(f'[EgoHand DELIVERY] {client_path} -> {type(window).__name__}',flush=True)
     window.show()
     if args.recording:window.select_recording(args.recording)
+    if args.open_results:window.open_results_path(args.open_results)
     if args.exit_when_finished:
         window.session.finished.connect(lambda:QTimer.singleShot(1000,window.close))
     if args.start:
@@ -54,7 +58,7 @@ def main(*, on_window=None):
             if args.exit_when_finished and getattr(window,'last_error',None):window.close()
         QTimer.singleShot(200,start)
     if args.demo:
-        window.source.setCurrentIndex(window.source.findData('synthetic'));QTimer.singleShot(200,window.start_pipeline)
+        window.enable_demo();QTimer.singleShot(200,window.start_pipeline)
     if args.quit_after:QTimer.singleShot(int(args.quit_after*1000),window.close)
     code=app.exec()
     return code or (1 if getattr(window,'last_error',None) else 0)

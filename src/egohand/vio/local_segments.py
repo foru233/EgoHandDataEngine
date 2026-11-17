@@ -150,8 +150,9 @@ def segment_hands_for_result(result, pose, world):
            'coordinate_frame':'segment','segment_id':None,'cross_segment_merge_permitted':False}
     if not isinstance(world,dict) or world.get('status') not in ('available','no_valid_hand_joints'):
         return out
-    stamp = world.get('pose_timestamp_ns')
-    if type(stamp) is not int or stamp != result.timestamp_ns:
+    from .hand_pose_binding import result_pose_timestamp
+    stamp = result_pose_timestamp(result, pose, world)
+    if stamp is None:
         out['reason']='exact_frame_join_required'
         return out
     local = consumer_segment_pose(pose,expected_timestamp_ns=stamp,world_hands=True)

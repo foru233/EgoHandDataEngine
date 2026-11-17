@@ -34,6 +34,7 @@ class LiveRecoveryProfile:
             raise ValueError(f"无法读取 v4 实时候选 Profile：{self.manifest}") from exc
         if self.data.get("schema_version") != 1 or self.data.get("profile") != "live_recovery_candidate_v4":
             raise ValueError("不支持的 v4 实时候选 Profile 版本")
+        self.label = self.data.get("label", self.label)
         self.paths = {
             key: (ROOT / value["path"]).resolve()
             for key, value in self.data.get("files", {}).items()
@@ -99,7 +100,8 @@ class LiveRecoveryProfile:
             "environment": self.environment,
             "config": self.config_snapshot.describe(),
             "calibration_id": self.calibration.calibration_id,
-            "production_deployed": False,
+            "production_deployed": bool(self.data.get("delivery_selected", False)),
+            "release_id": self.data.get("release_id"),
         }
 
     def worker_options(self):

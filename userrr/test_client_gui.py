@@ -6,6 +6,324 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from client_gui import ClientMainWindow
 
 
+def test_compact_toolbar_and_tiles_keep_controls_readable(qtbot):
+    from PySide6.QtCore import QPoint
+    from PySide6.QtWidgets import QPushButton, QToolButton
+    w=ClientMainWindow();qtbot.addWidget(w)
+    try:
+        w.resize(900,620);w.show();qtbot.wait(150)
+        assert not w._toolbar_wide
+        for group in w.command_groups:
+            assert group.mapTo(w,QPoint(0,0)).x()+group.width() <= w.width()
+            for button in group.findChildren(QPushButton)+group.findChildren(QToolButton):
+                if button.isVisible() and button.text():
+                    assert button.width() >= button.sizeHint().width()-2, button.text()
+        assert w.raw_left_tile.geometry().bottom()+1 == w.raw_right_tile.geometry().top()
+        assert w.raw_right_tile.geometry().bottom()+1 == w.depth_tile.geometry().top()
+        assert w.left_tile.geometry().bottom()+1 == w.right_tile.geometry().top()
+        assert w.record_output_parent.name=='ori'
+        assert w.result_output_parent is None
+        w.resize(1600,900);qtbot.wait(100)
+        assert w._toolbar_wide
+        record=w.record_controls.geometry();compute=w.compute_controls.geometry()
+        assert compute.left()-record.right()-1 == 0
+        assert record.height()==compute.height()
+        assert record.top()==compute.top()
+        assert {widget.height() for widget in (w.start_button,w.compute_button,w.view_menu_button,
+                w.source,w.hand_filter_toggle,w.body_gate_toggle,w.ground_adjust)}=={32}
+    finally:w.close()
+
+
+def test_rotation_pivot_uses_display_coordinates(qtbot):
+    import numpy as np
+    from types import SimpleNamespace
+    from delivery_views import DISPLAY_WORLD_ROTATION
+    w=ClientMainWindow();qtbot.addWidget(w)
+    try:
+        w._world_pose=np.eye(4);w._world_pose[:3,3]=[1.,2.,3.]
+        w._displayed_hands=[SimpleNamespace(joints=[SimpleNamespace(valid=True,xyz_m=[.2,.3,.4])])]
+        w.body_pose=SimpleNamespace(joints={'Pelvis':[1.,3.,3.],'Chest':[1.,1.,3.]})
+        for key,world in (('world',[0,0,0]),('camera',[1,2,3]),('hands',[1.2,2.3,3.4]),('body',[1,2,3])):
+            w.pivot_choice.setCurrentIndex(w.pivot_choice.findData(key))
+            p=w.preview.opts['center']
+            np.testing.assert_allclose([p.x(),p.y(),p.z()],DISPLAY_WORLD_ROTATION@np.asarray(world),atol=1e-6)
+    finally:w.close()
+
+
+def test_head_wireframe_follows_pose_and_short_direction():
+    import numpy as np
+    from delivery_views import head_wireframe
+    center=np.array([1.,2.,3.]); rotation=np.array([[0.,-1.,0.],[1.,0.,0.],[0.,0.,1.]])
+    points=head_wireframe(center,rotation)
+    assert points.shape==(146,3)
+    np.testing.assert_allclose(points[-2],center)
+    np.testing.assert_allclose(points[-1],center+rotation[:,2]*.03)
+    assert np.isfinite(points).all()
+
+
+def test_saved_depth_rejects_old_frame_and_coalesces_pending(qtbot,monkeypatch):
+    from types import SimpleNamespace
+    import numpy as np
+    w=ClientMainWindow();qtbot.addWidget(w)
+    active=SimpleNamespace(isRunning=lambda:True)
+    try:
+        w.depth_task=active;w.generation=10
+        w._request_saved_depth('old_frame','cal')
+        w.generation=11
+        w._request_saved_depth('current_frame','cal')
+        assert w._pending_saved_depth==(11,'current_frame','cal')
+        image=np.full((8,8,3),100,dtype=np.uint8)
+        w.on_depth(10,image,'old')
+        assert w.depth_view.pix is None
+        started=[]
+        monkeypatch.setattr(w,'_start_depth_task',lambda *args:started.append(args))
+        w._depth_finished(active)
+        assert started==[(11,'current_frame','cal')]
+        w.on_depth(11,image,'深度·已完成')
+        assert w.depth_view.pix is not None
+    finally:
+        w.depth_task=None;w.close()
+
+
+def test_saved_frame_requests_depth_from_matching_replay(qtbot,monkeypatch):
+    from types import SimpleNamespace
+    import numpy as np
+    from egohand.core.types import StereoFrame,StereoHandResult
+    w=ClientMainWindow();qtbot.addWidget(w)
+    frame=StereoFrame(4,123,np.zeros((48,64,3),np.uint8),np.zeros((48,64,3),np.uint8),'cal','recorded')
+    result=StereoHandResult(4,123,'cal','recorded')
+    requests=[]
+    class Replay:
+        calibration=object()
+        def seek(self,index):assert index==0
+        def read(self):return frame
+        def close(self):pass
+    try:
+        w.saved=[result];w.saved_replay=Replay()
+        monkeypatch.setattr(w,'_request_saved_depth',lambda f,c:requests.append((f,c)))
+        w.display_saved(0)
+        assert not w.depth_tile.isHidden()
+        assert requests==[(frame,w.saved_replay.calibration)]
+        assert w.depth_view.title=='深度计算中'
+        # Missing raw stereo must not retain a previous frame's depth.
+        w.saved_replay=None
+        w.display_saved(0)
+        assert w.depth_view.pix is None and '不可用' in w.depth_tile.caption.text()
+    finally:w.close()
+
+
+def test_saved_playback_waits_for_depth_and_pause_cancels_advance(qtbot,monkeypatch):
+    from types import SimpleNamespace
+    import numpy as np
+    w=ClientMainWindow();qtbot.addWidget(w)
+    try:
+        w.saved=[SimpleNamespace(timestamp_ns=i*33_333_333) for i in range(4)]
+        w.result_slider.valueChanged.disconnect(w.display_saved)
+        w.result_slider.setRange(0,3)
+        w.depth_task=SimpleNamespace(isRunning=lambda:True,generation=w.generation)
+        w.saved_play.setText('暂停')
+        w._advance_saved()
+        assert w._saved_depth_advance is not None and not w.saved_timer.isActive()
+        w.on_depth(w.generation,np.zeros((8,8,3),np.uint8),'深度')
+        assert w.saved_timer.isActive() and w._saved_depth_advance is None
+        w.saved_timer.stop();w._advance_saved()
+        assert w._saved_depth_advance is not None
+        w.toggle_saved_playback()
+        assert w._saved_depth_advance is None and w.saved_play.text()=='播放'
+        w.on_depth(w.generation,np.zeros((8,8,3),np.uint8),'深度')
+        assert not w.saved_timer.isActive()
+    finally:w.depth_task=None;w.close()
+
+
+def test_saved_playback_speed_and_seek(qtbot, monkeypatch):
+    from types import SimpleNamespace
+    w=ClientMainWindow();qtbot.addWidget(w)
+    try:
+        w.saved=[SimpleNamespace(timestamp_ns=i*100_000_000,diagnostics={}) for i in range(4)]
+        w.result_slider.valueChanged.disconnect(w.display_saved)
+        w.result_slider.setRange(0,3)
+        w.saved_speed.setCurrentIndex(w.saved_speed.findData(2.))
+        w.toggle_saved_playback()
+        assert w.saved_timer.isActive() and w.saved_timer.interval()==50
+        w.saved_timer.stop();w.result_slider.setValue(2);w._advance_saved()
+        assert w.result_slider.value()==3 and not w.saved_timer.isActive()
+        assert w.saved_play.text()=='播放'
+    finally:w.close()
+
+
+def test_saved_seek_release_commits_position_even_without_value_changed(qtbot, monkeypatch):
+    from types import SimpleNamespace
+    w=ClientMainWindow();qtbot.addWidget(w)
+    try:
+        w.saved=[SimpleNamespace(timestamp_ns=i*100_000_000) for i in range(4)]
+        calls=[]
+        monkeypatch.setattr(w,'display_saved',lambda index:calls.append(index))
+        w.result_slider.setRange(0,3)
+        w.result_slider.setValue(2)
+        w._saved_seek_finished()
+        assert calls == [2]
+    finally:w.close()
+
+
+def test_choose_output_parent(qtbot, monkeypatch, tmp_path):
+    from PySide6.QtWidgets import QFileDialog
+    w=ClientMainWindow();qtbot.addWidget(w)
+    try:
+        monkeypatch.setattr(QFileDialog,'getExistingDirectory',lambda *args: str(tmp_path))
+        w.choose_result_output()
+        assert w.result_output_parent==tmp_path
+        assert str(tmp_path) in w.output_label.text()
+        assert w.output_button.text()=='结果目录'
+    finally:w.close()
+
+
+def test_body_switches_are_independent_and_default_safe(qtbot):
+    w = ClientMainWindow(); qtbot.addWidget(w)
+    try:
+        assert not w.body_gate_toggle.isChecked()
+        assert w.body_toggle.isChecked()
+        assert w.hand_filter_toggle.isChecked()
+        assert w.ground_adjust.minimum() == 30
+        assert w.ground_adjust.maximum() == 210
+        w.ground_adjust.setValue(60)
+        assert w.ground_reference.height_m == .6 and w._ground_override
+        w.body_toggle.setChecked(False)
+        assert not w.body_gate_toggle.isChecked() and not w.body_toggle.isChecked()
+        w.body_toggle.setChecked(True)
+        assert not w.body_gate_toggle.isChecked() and w.body_toggle.isChecked()
+        assert w.body_overlay.visible
+        w.body_gate_toggle.setChecked(True)
+        assert w.body_gate_toggle.isChecked() and w.body_toggle.isChecked()
+        w.body_toggle.setChecked(False)
+        assert w.body_gate_toggle.isChecked() and not w.body_toggle.isChecked()
+        assert not w.body_overlay.visible
+    finally:
+        w.close()
+
+
+def test_ground_slider_and_number_stay_in_sync_and_refresh(qtbot, monkeypatch):
+    from types import SimpleNamespace
+    w=ClientMainWindow();qtbot.addWidget(w)
+    try:
+        result=SimpleNamespace()
+        w.latest=result
+        updates=[]
+        monkeypatch.setattr(w, '_update_body_pose', lambda value: updates.append(value))
+        w.ground_slider.setValue(300)
+        assert w.ground_adjust.value()==30 and w.ground_reference.height_m==.30
+        assert updates==[result]
+        w.ground_adjust.setValue(42)
+        assert w.ground_slider.value()==420 and w.ground_reference.height_m==.42
+        assert updates==[result,result]
+        assert w.ground_slider.hasTracking()
+    finally:
+        w.latest=None
+        w.close()
+
+
+def test_saved_slider_defers_decoding_until_release(qtbot, monkeypatch):
+    from types import SimpleNamespace
+    from PySide6.QtCore import Qt
+    w=ClientMainWindow();qtbot.addWidget(w)
+    try:
+        w.saved=[SimpleNamespace(timestamp_ns=i*33_000_000) for i in range(10)]
+        w.result_slider.setRange(0,9)
+        calls=[]
+        w.result_slider.valueChanged.disconnect(w.display_saved)
+        w.result_slider.valueChanged.connect(calls.append)
+        assert not w.result_slider.hasTracking()
+        w.result_slider.setSliderDown(True)
+        w.result_slider.setSliderPosition(3)
+        w.result_slider.setSliderPosition(7)
+        assert calls==[]
+        w.result_slider.setSliderDown(False)
+        assert calls==[7]
+    finally:w.close()
+
+
+def test_body_overlay_submits_exact_camera_and_dual_hand_input(qtbot,monkeypatch):
+    import numpy as np
+    from types import SimpleNamespace
+    w = ClientMainWindow(); qtbot.addWidget(w)
+    points = np.zeros((21, 3), dtype=float)
+    valid = np.zeros(21, dtype=bool); valid[[0, 5, 9, 13, 17]] = True
+    hands = [
+        {'handedness': 'Left', 'track_id': 1, 'xyz_world_m': (points + [-.35, .15, 1.0]).tolist(), 'valid': valid.tolist()},
+        {'handedness': 'Right', 'track_id': 2, 'xyz_world_m': (points + [.35, .15, 1.0]).tolist(), 'valid': valid.tolist()},
+    ]
+    result = SimpleNamespace(frame_id=4, timestamp_ns=100, session_id='s', world_hands={
+        'status': 'available', 'frame_id': 4, 'timestamp_ns': 100, 'session_id': 's',
+        'hands': hands, 'world_reference': {'map_epoch': None, 'world_frame_revision': None,
+                                             'reference_generation': None}},
+        diagnostics={'vio_pose': {'pose_valid': True, 'matrix': np.eye(4).tolist(), 'timestamp_ns': 100}})
+    from egohand.core.types import Hand3D
+    result.hands=[]
+    for side,x in [('Left',-.35),('Right',.35)]:
+        h=Hand3D(side,1.,len(result.hands)+1)
+        h.joints[0].valid=True;h.joints[0].xyz_m=np.array([x,.15,1.])
+        result.hands.append(h)
+    requests=[]
+    monkeypatch.setattr(w.smpl_controller,'request',lambda p:requests.append(p) or 1)
+    try:
+        w.body_toggle.setChecked(True)
+        w._update_body_pose(result)
+        assert w.body_pose is None and w.body_meta.text()=='SMPL · 求解中'
+        assert len(requests)==1
+        np.testing.assert_allclose(requests[0]['head_world'],[0,0,0])
+        np.testing.assert_allclose(requests[0]['wrists']['left'],[-.35,.15,1.])
+        np.testing.assert_allclose(requests[0]['wrists']['right'],[.35,.15,1.])
+    finally:
+        w.close()
+
+
+def test_completed_recording_starts_background_cache(qtbot, monkeypatch, tmp_path):
+    import json
+    from types import SimpleNamespace
+    import client_gui
+    w=ClientMainWindow();qtbot.addWidget(w)
+    try:
+        (tmp_path/'reprocessing.json').write_text(json.dumps({'status':'completed','result_count':3}),encoding='utf8')
+        jobs=[]
+        monkeypatch.setattr(client_gui.subprocess,'Popen',lambda args,**kwargs: jobs.append((args,kwargs)) or SimpleNamespace(poll=lambda:None))
+        w._computed_output=tmp_path
+        w.on_finished()
+        assert len(jobs)==2 and all(str(tmp_path) in job[0] for job in jobs)
+        assert any('build_saved_replay_cache.py' in job[0][1] for job in jobs)
+        pose_job=next(job for job in jobs if 'build_unified_smpl_replay.py' in job[0][1])
+        assert '--in-place' in pose_job[0] and '--mano' in pose_job[0]
+        assert '--initial-camera-height-m' in pose_job[0]
+        assert w._cache_jobs and '缓存' in w.output_label.text()
+    finally:w.close()
+
+
+def test_successful_record_stop_precomputes_meshes_once(qtbot,monkeypatch,tmp_path):
+    w=ClientMainWindow();qtbot.addWidget(w)
+    (tmp_path/'results').mkdir();(tmp_path/'results/frames.jsonl').write_text('',encoding='utf8')
+    jobs=[];monkeypatch.setattr(w,'_start_pose_derivation',jobs.append)
+    w.recording_path=tmp_path
+    w.on_recording(True,False,'录制中');assert not jobs
+    w.on_recording(True,True,'录制暂停');assert not jobs
+    w.on_recording(False,False,'录制已停止');assert jobs==[tmp_path]
+    w._finish_recording_mesh_cache();assert jobs==[tmp_path]
+    w.close()
+
+
+def test_background_pose_and_replay_jobs_report_their_own_results(qtbot, tmp_path):
+    from types import SimpleNamespace
+    w=ClientMainWindow();qtbot.addWidget(w)
+    try:
+        (tmp_path/'display_cache.sqlite3').touch()
+        notes=[]
+        w._output_note=notes.append
+        w._cache_jobs=[(SimpleNamespace(poll=lambda:0),tmp_path,'pose'),
+                       (SimpleNamespace(poll=lambda:0),tmp_path,'replay')]
+        w._poll_cache_jobs()
+        assert any('SMPL / MANO 网格缓存' in x and '失败' in x for x in notes)
+        assert any('拖动缓存' in x and '完成' in x for x in notes)
+        assert not w._cache_jobs
+    finally:w.close()
+
+
 def test_live_hands_bind_only_exact_frame_in_either_arrival_order(qtbot):
     import numpy as np
     from types import SimpleNamespace
@@ -100,7 +418,7 @@ def test_customer_lifecycle_and_mode_lock(qtbot):
     try:
         assert w.mode.currentData()=='live_recovery_v4'
         assert len(w.column_widgets)==3
-        w.source.setCurrentIndex(w.source.findData('synthetic'))
+        w.enable_demo()
         w.start_pipeline()
         qtbot.waitUntil(lambda:w.latest is not None,timeout=15000)
         assert w.left_view.pix is not None and w.right_view.pix is not None
@@ -115,7 +433,7 @@ def test_customer_lifecycle_and_mode_lock(qtbot):
         worker=w.session.worker
         assert w.stop_pipeline() and not worker.isRunning()
         assert w.mode.isEnabled()
-        w.mode.setCurrentIndex(w.mode.findData('stereo'))
+        w.mode.addItem('测试纯双目','stereo');w.mode.setCurrentIndex(w.mode.findData('stereo'))
         w.start_pipeline()
         qtbot.waitUntil(lambda:w.latest is not None,timeout=15000)
         assert w.session.worker.vio_mode=='stereo'
@@ -155,7 +473,8 @@ def test_depth_range_controls_only_display_and_filter_valid_values(qtbot):
     w=ClientMainWindow();qtbot.addWidget(w)
     try:
         assert not hasattr(w,'depth_near') and not hasattr(w,'depth_filter')
-        assert '全部有效值' in w.depth_tile.caption.text()
+        assert w.depth_tile.caption.text() == '深度'
+        assert '全部有效值' in w.depth_tile.caption.toolTip()
     finally:w.close()
 
 
@@ -183,15 +502,18 @@ def test_hands_are_placed_in_world_frame_with_current_pose(qtbot):
         transform=np.eye(4);transform[:3,3]=[1.0,2.0,3.0]
         w.hand_overlay.update([hand],transform)
         assert w.hand_overlay.items
+        assert w.hand_overlay.items[-1].pxMode is False
+        assert w.hand_overlay.items[-1].size == .012
         points=np.asarray(w.hand_overlay.items[-1].pos)
-        np.testing.assert_allclose(points,np.tile([1.0,2.05,3.5],(len(points),1)),atol=1e-6)
+        np.testing.assert_allclose(points,np.tile([1.0,3.5,-2.05],(len(points),1)),atol=1e-6)
         # 逆变换应回到相机系，确认不是随便平移
-        back=(points-transform[:3,3])@transform[:3,:3]
+        from delivery_views import DISPLAY_WORLD_ROTATION
+        back=(points-transform[:3,3]@DISPLAY_WORLD_ROTATION.T)@DISPLAY_WORLD_ROTATION
         np.testing.assert_allclose(back,np.tile([0.0,0.05,0.5],(len(back),1)),atol=1e-6)
         # 无有效位姿：按相机原点显示
         w.hand_overlay.update([hand],None)
         points=np.asarray(w.hand_overlay.items[-1].pos)
-        np.testing.assert_allclose(points,np.tile([0.0,0.05,0.5],(len(points),1)),atol=1e-6)
+        np.testing.assert_allclose(points,np.tile([0.0,0.5,-0.05],(len(points),1)),atol=1e-6)
         # 手部开关只影响可见性，不改变坐标
         w.hands_toggle.setChecked(False)
         assert not any(item.visible() for item in w.hand_overlay.items)
@@ -234,7 +556,7 @@ def test_customer_pause_freezes_and_resumes_live_preview(qtbot):
     w=ClientMainWindow();qtbot.addWidget(w);w.show()
     try:
         assert not w.pause_button.isEnabled()
-        w.source.setCurrentIndex(w.source.findData('synthetic'))
+        w.enable_demo()
         w.start_pipeline()
         qtbot.waitUntil(lambda:w.latest is not None,timeout=15000)
         worker=w.session.worker

@@ -10,19 +10,36 @@
       "sha256": "8e7cf1ee8837696ff8720880ee6acacf3bdf26bb5697bd7dda5b44b284046517"
     },
     "quality": {
-      "path": "configs/vio/live_quality.yaml",
-      "sha256": "8af8beae71e519f3d759bf50671fd8317a347223d8ee4dde91934ad85693eb2e"
+      "path": "handoff/delivery_v4_r1_20261116/assets/quality.yaml",
+      "sha256": "9f14a66553f4ef58a2389bf32d77ff3f884a5cccdbdbe1a134bff17b8b387c1f"
     },
     "library": {
-      "path": "handoff/vio_recovery_bridge_20261113/bin/egohand_vio_short_recovery_candidate.dll",
-      "sha256": "d4e3d5f13341ff542111cee792ebac7aa160f976170330fd087fe8fca25c3158"
+      "path": "handoff/delivery_v4_r1_20261116/assets/egohand_vio_short_recovery_candidate.dll",
+      "sha256": "9849feb700f9dfdbf0fda2d5942617ab0d892e557c59b80d63b7993dcd1dcb85"
     },
     "recovery": {
-      "path": "handoff/vio_recovery_bridge_v4_20261113/recovery_candidate.yaml",
-      "sha256": "a96545804cf1db79399133dabf2311f73e589b7018f11899d4ced341e0a78df2"
+      "path": "handoff/delivery_v4_r1_20261116/assets/recovery.yaml",
+      "sha256": "cc2c155e5779f7574a2ab8afbb6102e0ff1cc90d8b1760d73ade9a7deabc3150"
     }
   },
   "environment": {
+    "EGOHAND_VIO_SHORT_RECOVERY": "1",
+    "EGOHAND_VIO_RIGHT_INDEX_FIX": "1",
+    "EGOHAND_VIO_RIGHT_WEIGHT_FIX": "1",
+    "EGOHAND_VIO_LOST_KEYFRAME_GUARD": "1",
+    "EGOHAND_VIO_VISUAL_VELOCITY_SEED": "1",
+    "EGOHAND_VIO_MERGE_OBSERVATION_FIX": "1",
+    "EGOHAND_VIO_GEOMETRIC_RETRY": "0",
+    "EGOHAND_VIO_FRAME_SEARCH_SEED": "0",
+    "EGOHAND_VIO_KF_COVARIANCE_CAPTURE": "0",
+    "EGOHAND_VIO_KF_COVARIANCE_PRIOR": "0",
+    "EGOHAND_VIO_TRANSITION_IMU_SEED": "0",
+    "EGOHAND_VIO_PREINIT_KF_INLIERS_ONLY": "1",
+    "EGOHAND_VIO_SHARED_STEREO": "1",
+    "EGOHAND_VIO_TEMPORAL_STEREO_INITIALIZER": "0",
+    "EGOHAND_VIO_ORB_PARALLEL_LEVELS": "0",
+    "EGOHAND_VIO_HAND_FRAME_SUBMISSION": "0",
+    "EGOHAND_VIO_UNLINKED_REFERENCE_RESTART": "0",
     "EGOHAND_VIO_GAUGE_CONSTRAINT": "1",
     "EGOHAND_VIO_WORLD_FRAME_DISABLE": "0",
     "EGOHAND_VIO_DEPTH_GATE": "0",
@@ -30,6 +47,11 @@
     "EGOHAND_VIO_ENTRY_PRUNE": "0",
     "EGOHAND_VIO_GAUGE_FIX": "0",
     "EGOHAND_VIO_CHEIRALITY_GUARD": "1",
-    "EGOHAND_VIO_SHORT_RECOVERY": "1"
-  }
+    "EGOHAND_VIO_DISABLE_RECOVERY": "0",
+    "EGOHAND_VIO_RECOVERY_PROTOCOL": "2"
+  },
+  "release_id": "v4-r1-20261116",
+  "label": "v4 离线恢复 · 交付 R1（20261116）· 全分辨率",
+  "delivery_selected": true,
+  "physical_device_validated": false
 }

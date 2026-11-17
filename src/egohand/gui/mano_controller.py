@@ -26,6 +26,18 @@ class ManoController(QObject):
         if not show_pred and not show_truth:
             if self.current is not None:self.reset()
             return
+        # Offline replay writes fitted MANO meshes into the derived sidecar.
+        # Consume them directly so seeking never starts a new optimizer job.
+        cached=(result.diagnostics.get('offline_derived_pose') or {}).get('mano') or {}
+        if cached.get('source')=='mano_worker':
+            predicted=cached.get('predicted',[]) if show_pred else []
+            truth=cached.get('truth',[]) if show_truth else []
+            self.window.skeleton.set_mano_meshes(predicted,truth,redraw=True)
+            self.last_key=('cached',result.session_id,result.frame_id,show_pred,show_truth)
+            self.current=(self.last_key,result,frame)
+            self.busy=False
+            self.window.statusBar().showMessage(f"MANO 缓存：{len(predicted)} 个网格" if predicted else 'MANO 缓存：本帧无有效网格')
+            return
         sequence=f'{self.generation}:{result.session_id}:{result.source_type}:{result.calibration_id}'
         # 同一帧因参数变化可能被重新处理；对象身份区分新旧骨架。
         key=(sequence,result.frame_id,show_pred,show_truth,id(result))

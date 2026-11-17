@@ -39,7 +39,8 @@ def main():
             env.pop(key)
     env['EGOHAND_VIO_STEREO_ONLY'] = '0'
     result = subprocess.run([sys.executable, str(Path(__file__).resolve()), '--probe', '--library',
-                             str(args.library.resolve())], env=env, text=True, capture_output=True, timeout=120)
+                             str(args.library.resolve())], env=env, text=True, encoding='utf-8',
+                             errors='replace', capture_output=True, timeout=120)
     match = re.search(r'Camera 2 parameters \(Kannala-Brandt\)?:\s*\[([^\]]+)\]', result.stdout)
     if result.returncode or not match:
         raise RuntimeError(f'native settings probe failed: code={result.returncode}\n{result.stdout}\n{result.stderr}')

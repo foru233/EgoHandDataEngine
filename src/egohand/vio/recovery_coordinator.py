@@ -19,11 +19,18 @@ class RecoveryCoordinator:
     def __init__(self, *, max_boundary_hold_ns=5_000_000, stable_seconds=1.5,
                  quarantine_timeout_s=3.0, timeout_action='report_only',
                  application_admission=False, short_recovery=False,
-                 allow_initialized_anchor=False, **predictor_options):
+                 allow_initialized_anchor=False, allow_startup_relocalization=False,
+                 geometry_restart=False, **predictor_options):
         self.predictor=LossRecoveryPredictor(**predictor_options)
         self.application_admission=bool(application_admission)
         self.short_recovery=bool(short_recovery)
         self.allow_initialized_anchor=bool(allow_initialized_anchor)
+        # An initializer identity is not a trusted pose or an inertial anchor.
+        self.allow_startup_relocalization=bool(allow_startup_relocalization)
+        if type(geometry_restart) is not bool:
+            raise ValueError('geometry_restart must be boolean')
+        self.geometry_restart=geometry_restart
+        self.startup_visual_identity=None
         self.trusted_visual_identity=None
         self.quality=(None if self.application_admission else
                       PoseQualityGate(stable_seconds=stable_seconds,resume_same_map=False))
@@ -56,6 +63,7 @@ class RecoveryCoordinator:
         evidence and prediction state are deliberately discarded.
         """
         self.trusted_visual_identity=None
+        self.startup_visual_identity=None
         self.predictor.anchor=None
         self.predictor.samples=[]
         self.invalid_reason=None
@@ -109,7 +117,16 @@ class RecoveryCoordinator:
             self.last_sample=s
             if self.predictor.anchor is not None and s.timestamp_ns>self.predictor.anchor.timestamp_ns:
                 try:self.predictor.push(s)
-                except (ValueError,OverflowError) as exc:
+                except OverflowError as exc:
+                    if self.short_recovery:
+                        # Bounded prediction expiry is not a sensor fault.
+                        # Retire only the inertial history; visual identity,
+                        # existing faults and quarantine still require proof.
+                        self.predictor.anchor=None
+                    else:
+                        self.invalid_reason=str(exc)
+                    self.predictor.samples=[]
+                except ValueError as exc:
                     self.invalid_reason=str(exc)
                     # 清空污染样本；锚点保留用于后续一致性检查，但预测不可用直到重建锚点。
                     self.predictor.samples=[]
@@ -123,12 +140,22 @@ class RecoveryCoordinator:
         # Callback is a relocalization candidate even when native loses and
         # re-localizes within one TrackStereo call before Python sees LOST.
         # Preserve the IMU decision as diagnostics; native acceptance needs an
-        # independent visual verifier, which this implementation does not have.
+        # independent visual verifier. The experimental path below binds native
+        # stereo/map geometry to the final frame and reference snapshot.
         result['visual_requalification_required']=bool(self.ever_tracking_ok or self.quarantined)
         result['independent_visual_verification']='unavailable'
+        startup_reference=self.startup_visual_identity
+        startup_candidate=bool(self.allow_startup_relocalization and self.application_admission and
+            (not self.quarantined or self.quarantine_cause=='independent_visual_verification_unavailable') and
+            self.trusted_visual_identity is None and
+            self.predictor.anchor is None and startup_reference is not None and
+            isinstance(geometry,dict) and geometry.get('phase')=='relocalization' and
+            geometry.get('atlas_generation')==startup_reference[-1] and
+            tuple(geometry.get(k) for k in ('map_id','reset_id','map_revision'))==startup_reference[:3] and
+            geometry.get('reference_generation')==startup_reference[4])
         # Provisional acceptance by Tracking still needs final snapshot binding.
         if (self.short_recovery and not self.invalid_reason and self.quarantine_cause!='pose_jump' and
-            map_epoch==self.map_epoch and self.trusted_visual_identity is not None and
+            map_epoch==self.map_epoch and (self.trusted_visual_identity is not None or startup_candidate) and
             geometry_candidate(geometry,timestamp_ns=timestamp_ns,map_epoch=map_epoch,
                 reference_generation=self.reference_generation,candidate_body=T_world_from_body)):
             motion=(self.predictor.evaluate(T_world_from_body,timestamp_ns,str(map_epoch),
@@ -137,7 +164,8 @@ class RecoveryCoordinator:
             if motion['status']!='inconsistent':
                 result={**result,'status':'consistent','reason':'native_stereo_geometry_candidate',
                     'motion_check':motion,'independent_visual_verification':'provisional_native_geometry',
-                    'evidence_kind':'stereo_map_geometry_not_imu_truth'}
+                    'evidence_kind':'stereo_map_geometry_not_imu_truth',
+                    'startup_geometry_candidate':startup_candidate}
         self.callback_results.append(result)
         return result
 
@@ -187,10 +215,15 @@ class RecoveryCoordinator:
             self._update_anchor(result,body)
         if feedback['pose_admitted'] and not self.quarantined:
             self.trusted_visual_identity=visual_reference(result)
+            self.startup_visual_identity=None
         stamp=int(result['timestamp_ns'])
         # Abandon the unverified old reference; never release its pose on time.
         elapsed,timed_out,request_new_map=self._timeout_request(stamp,application_commit=True)
-        report={**native,'stage':'committed','anchor_available':self.predictor.anchor is not None,
+        geometry_restart=self._geometry_restart(result,feedback)
+        if geometry_restart['request_new_map']:
+            request_new_map=True
+            self.new_map_requested=True
+        report={**native,'geometry_restart':geometry_restart,'stage':'committed','anchor_available':self.predictor.anchor is not None,
                 'await_visual_requalification':self.quarantined,
                 'quarantine_cause':self.quarantine_cause,'evidence_status':self.evidence_status,
                 'quarantine_elapsed_s':elapsed*1e-9,
@@ -199,6 +232,26 @@ class RecoveryCoordinator:
                 'application_pose_admitted':feedback['pose_admitted'] and not self.quarantined}
         self._pending_application=None
         return report
+
+    def _geometry_restart(self,result,feedback):
+        """Current observability permits abandoning, never accepting, old coordinates.
+
+        The host's unchanged quality gate must first pass its stable window.
+        Qualified geometry cannot prove continuity across a rejected pose jump.
+        Request the existing independent-map mechanism exactly once instead.
+        """
+        eligible=bool(self.geometry_restart and self.application_admission and
+            self.short_recovery and self.timeout_action=='independent_new_map' and
+            self.quarantined and self.quarantine_cause=='pose_jump' and
+            not self.invalid_reason and not self.new_map_requested and
+            feedback['quality_passed'] and not feedback['jump_detected'] and
+            result.get('snapshot_available') is True and
+            result.get('snapshot_consistent') is True and
+            geometry_matches_frame(result,result.get('recovery_observation'),visual_reference(result)))
+        return {'request_new_map':eligible,
+            'reason':'observable_geometry_abandon_jumped_reference' if eligible else 'not_eligible',
+            'evidence_kind':'current_geometry_not_old_reference_continuity',
+            'old_reference_requalified':False}
 
     def _update_anchor(self,result,body):
         initialized_anchor=(self.allow_initialized_anchor and result.get('imu_initialized') is True)
@@ -223,6 +276,7 @@ class RecoveryCoordinator:
                 or missing_world or reference_bad):
             # A failed native snapshot can contain default map fields.  Do not
             # advance the trusted identity or clear quarantine on that frame.
+            self.startup_visual_identity=None
             failure = ('reference_frame_unverified' if reference_bad else
                        'world_revision_unavailable' if missing_world else 'identity_snapshot_unverified')
             self.predictor.anchor=None;self.predictor.samples=[];self.invalid_reason=failure
@@ -248,6 +302,7 @@ class RecoveryCoordinator:
             self.reference_generation is not None and result.get('reference_generation')!=self.reference_generation)
         self.reference_generation=result.get('reference_generation')
         if world_changed:
+            self.startup_visual_identity=None
             self.predictor.anchor=None;self.predictor.samples=[];self.invalid_reason=None
             self.tracking_was_lost=False
         self.world_frame_revision=revision
@@ -275,11 +330,21 @@ class RecoveryCoordinator:
                 self.quarantine_cause=None;self.evidence_status=None
             self.tracking_was_lost=False
             if known_new_map:
+                self.startup_visual_identity=None
                 self.ever_tracking_ok=False;self.recovery_evidence_required=False
                 self.trusted_visual_identity=None
         if loss_requires_evidence and not known_new_map and (world_changed or same_map_revision):
             self._quarantine('reference_changed_during_loss','unavailable')
         self.map_epoch=epoch
+        if (self.allow_startup_relocalization and self.application_admission and
+            self.short_recovery and not self.quarantined and not self.invalid_reason and
+            self.trusted_visual_identity is None and self.predictor.anchor is None and
+            self.startup_visual_identity is None and not self.callback_results and
+            (known_new_map or not self.ever_tracking_ok) and
+            result.get('pose_valid') is True and result.get('tracking_state')=='OK' and
+            snapshot_identity_matches_epoch(result) and not invalid_reference_frame(None,result) and
+            not invalid_world_revision_transition(None,result.get('world_frame_revision'))):
+            self.startup_visual_identity=visual_reference(result)
         checked=result if self.application_admission else self.quality.check(result)
         # 已有锚点后发生异常跳变时，即使 ORB 仍声称 OK 也必须隔离；
         # 仅凭后续几秒稳定不能证明新位置属于正确的地图坐标。
@@ -328,14 +393,22 @@ class RecoveryCoordinator:
         if result.get('pose_valid') and result.get('tracking_state')=='OK':
             self.recovery_evidence_required=False
         visual_release=None
+        startup_final=bool(self.allow_startup_relocalization and self.application_admission and
+            self.trusted_visual_identity is None and self.predictor.anchor is None and
+            self.startup_visual_identity is not None and
+            (candidate is None or (candidate.get('startup_geometry_candidate') is True and
+             candidate.get('independent_visual_verification')=='provisional_native_geometry' and
+             candidate.get('status')=='consistent')) and
+            self.quarantine_cause=='independent_visual_verification_unavailable')
+        release_reference=(self.startup_visual_identity if startup_final else self.trusted_visual_identity)
         if (self.short_recovery and not self.invalid_reason and self.quarantined and self.quarantine_cause!='pose_jump' and
-            geometry_matches_frame(result,result.get('recovery_observation'),self.trusted_visual_identity)):
+            geometry_matches_frame(result,result.get('recovery_observation'),release_reference)):
             motion=({'status':'unavailable','reason':self.invalid_reason or 'no_trusted_anchor'}
                 if self.invalid_reason or self.predictor.anchor is None or not body_consistent else
                 self.predictor.evaluate(body['T_world_from_body'],result['timestamp_ns'],str(epoch),
                     max_endpoint_hold_ns=self.max_hold))
             if motion['status']!='inconsistent':
-                visual_release={'status':'qualified','kind':'same_reference_stereo_map_geometry',
+                visual_release={'status':'qualified','kind':('independent_startup_stereo_map_geometry' if startup_final else 'same_reference_stereo_map_geometry'),
                     'timestamp_ns':result['timestamp_ns'],'motion_check':motion,
                     'geometry':result['recovery_observation']}
                 self.quarantined=False;self.quarantine_since_ns=None;self.new_map_requested=False

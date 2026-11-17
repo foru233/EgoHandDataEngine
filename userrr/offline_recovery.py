@@ -70,7 +70,9 @@ class OfflineRecoveryProfile:
             'environment': self.environment, 'recording': str(recording),
             'config': config.describe(), 'hand_calibration_id': calibration.calibration_id,
             'source_sha256': {str(p.relative_to(ROOT)): sha(p) for p in source_files},
-            'fresh_hand_inference': True, 'production_deployed': False}
+            'fresh_hand_inference': True,
+            'production_deployed': bool(self.data.get('delivery_selected', False)),
+            'release_id': self.data.get('release_id')}
         (output/'gui_launch.json').write_text(json.dumps(provenance, ensure_ascii=False, indent=2), encoding='utf8')
         options=dict(calibration=calibration, vio_config_snapshot=config,
                     vio_library_path=self.paths['library'], vio_worker=None)

@@ -28,6 +28,8 @@ This repository contains only the project's own source code, documentation,
 configuration and tests. It does NOT redistribute the third-party components
 listed below; they must be obtained separately by the user:
 
+- SMPL body model (models/smpl/): subject to the SMPL Model License;
+  obtain it separately from https://smpl.is.tue.mpg.de/ and accept its terms.
 - MANO hand model (models/mano/*.pkl): Max Planck Institute proprietary
   licence, non-commercial research/education only, redistribution prohibited.
   Obtain it from https://mano.is.tue.mpg.de/ and accept its licence.

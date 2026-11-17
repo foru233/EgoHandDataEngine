@@ -1,3 +1,4 @@
+from .stereo_transport import SHARED_STEREO, negotiate as negotiate_stereo
 """VS030 实验性实时 VIO：独立进程、显式时序与可观察的失败状态。"""
 from collections import deque
 from dataclasses import replace
@@ -73,8 +74,17 @@ def _recv(sock,n):
     return bytes(result)
 
 def _send_tracking_frame(sock, stamp, left, right, measurements, *, recovery_protocol=1,
-                         reset_imu_alignment=False):
+                         reset_imu_alignment=False, shared_transport=None):
     packet = b''.join(IMU.pack(*row) for row in measurements)
+    if shared_transport is not None:
+        if recovery_protocol != PROTOCOL:
+            raise ValueError('shared stereo requires negotiated frame context')
+        descriptor=shared_transport.publish(left,right)
+        sock.sendall(HEADER.pack(int(stamp),left.shape[1],left.shape[0],len(measurements)))
+        sock.sendall(FRAME_CONTEXT.pack((RESET_IMU_ALIGNMENT if reset_imu_alignment else 0)|SHARED_STEREO))
+        sock.sendall(struct.pack('<I',len(descriptor))+descriptor)
+        if packet:sock.sendall(packet)
+        return
     sock.sendall(HEADER.pack(int(stamp), left.shape[1], left.shape[0], len(measurements)))
     if recovery_protocol==PROTOCOL:
         sock.sendall(FRAME_CONTEXT.pack(RESET_IMU_ALIGNMENT if reset_imu_alignment else 0))
@@ -180,8 +190,14 @@ class LiveVioWorker:
             settings=visual_bootstrap_settings(settings)
         from .library_manifest import select_library
         explicit_environment=dict(environment or {})
-        env=apply_mode_environment(vio_subprocess_environment(recovery_protocol=PROTOCOL),mode)
+        env=vio_subprocess_environment(recovery_protocol=PROTOCOL)
+        if explicit_environment:
+            # An explicit profile owns the child policy, including disabled
+            # experiments. Do not inherit a previous shell's native switches.
+            env={k:v for k,v in env.items() if not k.startswith(('EGOHAND_VIO_', 'EGOHAND_TEST_'))}
         env.update(explicit_environment)
+        env=apply_mode_environment(env,mode)
+        env['EGOHAND_VIO_RECOVERY_PROTOCOL']=str(PROTOCOL)
         library=Path(library_path).resolve() if library_path is not None else None
         if library is None and env.get('EGOHAND_VIO_LIBRARY'):
             library=Path(env['EGOHAND_VIO_LIBRARY']).resolve()
@@ -352,6 +368,7 @@ class LiveVio:
     def _run_session(self):
         listener=None;log=None;audit=None;imu_raw=None;imu_raw_path=None;imu_raw_count=0
         proc=None;worker_failed=False;retry=False;worker_log=None;phase_preparation=None
+        shared_transport=None
         try:
             from .config_snapshot import resolve_live_config, load_config_snapshot
             config=self.config_snapshot or resolve_live_config()
@@ -412,8 +429,10 @@ class LiveVio:
                 worker_failed=True
                 raise RuntimeError(message.get('message','VIO 初始化失败'))
             recovery_protocol=negotiate_recovery(message,
-                requested=int(os.environ.get('EGOHAND_VIO_RECOVERY_PROTOCOL',str(PROTOCOL))),
-                enabled=self.use_imu and os.environ.get('EGOHAND_VIO_DISABLE_RECOVERY')!='1')
+                requested=int(self.vio_environment.get('EGOHAND_VIO_RECOVERY_PROTOCOL',os.environ.get('EGOHAND_VIO_RECOVERY_PROTOCOL',str(PROTOCOL)))),
+                enabled=self.use_imu and self.vio_environment.get('EGOHAND_VIO_DISABLE_RECOVERY',os.environ.get('EGOHAND_VIO_DISABLE_RECOVERY'))!='1')
+            shared_transport=negotiate_stereo(message,recovery_protocol,
+                requested=self.vio_environment.get('EGOHAND_VIO_SHARED_STEREO',os.environ.get('EGOHAND_VIO_SHARED_STEREO'))=='1')
             localization=LocalizationPipeline(self.mode,quality,continuity=continuity,
                 recovery_commit=self._commit_recovery if recovery_protocol==PROTOCOL else None)
             lag_ms=float(timing.get('camera_to_imu_lag_ms',0.0))
@@ -570,8 +589,10 @@ class LiveVio:
                     continue
                 _send_tracking_frame(self.sock,stamp,left,right,measurements,
                     recovery_protocol=recovery_protocol,
-                    reset_imu_alignment=localization.take_imu_alignment_reset())
+                    reset_imu_alignment=localization.take_imu_alignment_reset(),shared_transport=shared_transport)
                 result=self._read_message()
+                if shared_transport is not None and result.get('image_transport')!='shared_memory_v1':
+                    raise RuntimeError('worker did not confirm shared stereo input')
                 worker_return_ns=time.perf_counter_ns()
                 if result.get('type')=='error':
                     worker_failed=True
@@ -673,6 +694,7 @@ class LiveVio:
             self.source.imu_vio_queue=None
             if self.sock:self.sock.close();self.sock=None
             if listener:listener.close()
+            if shared_transport is not None:shared_transport.close()
             if self._owns_worker or (worker_failed and not self.stop_event.is_set()):self.worker.close()
             if log:log.close()
             if audit:audit.close()

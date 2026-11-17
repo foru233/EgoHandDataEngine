@@ -18,7 +18,8 @@ def test_live_candidate_profile_is_explicit_and_geometry_bound():
     assert options['vio_environment']['EGOHAND_VIO_RECOVERY_CONFIG'] == str(profile.paths['recovery'])
     assert options['vio_config_snapshot'].image_scale == 1.0
     assert profile.data['files']['library']['sha256'] != '0' * 64
-    assert profile.provenance['production_deployed'] is False
+    assert profile.provenance['production_deployed'] is True
+    assert profile.provenance['release_id'] == 'v4-r1-20261116'
 
 
 def test_live_candidate_profile_rejects_changed_timing(tmp_path):
@@ -62,7 +63,7 @@ def test_research_gui_exposes_same_v4_profile_choice(qtbot):
     qtbot.addWidget(window)
     try:
         assert window.vio_panel.live_profile.currentData() == 'v4'
-        assert window.vio_panel.live_profile.itemText(window.vio_panel.live_profile.findData('v4')) == 'v4 实时恢复实验版'
+        assert window.vio_panel.live_profile.itemText(window.vio_panel.live_profile.findData('v4')) == 'v4 实时恢复 · 交付 R1'
     finally:
         window.close()
 
@@ -89,11 +90,11 @@ def test_customer_vio_status_uses_customer_language(qtbot):
     qtbot.addWidget(window)
     try:
         assert '初始化' in window._customer_vio_status({'type': 'status', 'message': '等待双目与 IMU'})
-        assert 'IMU 临时预测' in window._customer_vio_status({
+        assert 'IMU 预测' in window._customer_vio_status({
             'type': 'pose',
             'recovery_preaccept': {'loss_prediction': {'status': 'predicted'}},
         })
-        assert '新地图建立中' in window._customer_vio_status({'type': 'pose', 'automatic_new_map': True})
+        assert '新地图初始化' in window._customer_vio_status({'type': 'pose', 'automatic_new_map': True})
         assert '定位正常' in window._customer_vio_status({
             'type': 'pose', 'localization': {'state': 'VIO_TRACKING',
                 'admission': {'map_pose_available': True}},

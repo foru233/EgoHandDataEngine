@@ -46,10 +46,10 @@ def test_candidate_binds_complete_geometry_and_fresh_native_worker(qtbot, monkey
         assert called['calibration'].calibration_id.endswith('cam0-left')
         d = json.loads((tmp_path/'run/gui_launch.json').read_text(encoding='utf8'))
         assert d['files']['library']['sha256'] == profile.data['files']['library']['sha256']
-        assert d['production_deployed'] is False
+        assert d['production_deployed'] is True
         w.sync_controls()
         assert not w.source.isEnabled() and not w.mode.isEnabled()
-        assert '候选' in w.windowTitle() and '全分辨率' in w.profile_label.text()
+        assert '交付 R1' in w.windowTitle() and '全分辨率' in w.profile_label.text()
     finally:w.close()
 
 
@@ -92,7 +92,8 @@ def test_launcher_does_not_inherit_disabled_recovery_or_test_overrides(monkeypat
     p.configure_process()
     from egohand.vio.live_runtime import vio_subprocess_environment
     env = vio_subprocess_environment(recovery_protocol=2)
-    assert 'EGOHAND_VIO_DISABLE_RECOVERY' not in env
+    assert env.get('EGOHAND_VIO_DISABLE_RECOVERY') == p.environment.get('EGOHAND_VIO_DISABLE_RECOVERY')
+    assert env.get('EGOHAND_VIO_DISABLE_RECOVERY') != '1'
     assert 'EGOHAND_TEST_OLD_DIAGNOSTIC' not in env
     assert env['EGOHAND_VIO_SHORT_RECOVERY'] == '1'
     assert env['EGOHAND_VIO_LIBRARY'] == str(p.paths['library'])
@@ -103,12 +104,13 @@ def test_normal_gui_keeps_production_modes_and_worker(qtbot, monkeypatch):
     w = ClientMainWindow();qtbot.addWidget(w)
     try:
         assert w.recovery_profile is None and w.source.findData('vendor') >= 0
-        assert w.mode.count() == 5 and '正式 DLL' in w.mode.itemText(0)
+        assert w.mode.count() == 2 and w.source.count() == 2
+        assert w.mode.findData('stereo') == -1 and w.source.findData('synthetic') == -1
         assert w.mode.currentData() == 'live_recovery_v4'
         assert w.source.isEnabled() and w.mode.isEnabled()
         called = {}
         monkeypatch.setattr(w.session, 'start', lambda source, **kw: called.update(kw))
-        w.source.setCurrentIndex(w.source.findData('synthetic'));w.start_pipeline()
+        w.enable_demo();w.start_pipeline()
         assert called['vio_worker'] is w.live_vio_worker
         assert 'vio_library_path' not in called and 'vio_config_snapshot' not in called
     finally:w.close()
@@ -126,6 +128,7 @@ def test_normal_gui_recording_selects_isolated_candidate(qtbot, monkeypatch, tmp
         w.start_pipeline()
         assert w.last_error is None and called['request'].kind=='recorded'
         assert called['vio_mode']=='stereo_inertial' and called['vio_worker'] is None
+        assert called['save_depth'] is True
         assert called['vio_environment']['EGOHAND_VIO_SHORT_RECOVERY']=='1'
         assert called['vio_library_path'].name=='egohand_vio_short_recovery_candidate.dll'
     finally:w.close()

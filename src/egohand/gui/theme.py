@@ -29,12 +29,17 @@ def stylesheet(name):
     QMainWindow, QWidget#applicationRoot { background:%(background)s; }
     QFrame#appHeader, QFrame#commandBar, QFrame#inspector, QFrame#viewportCard, QFrame#statCard { background:%(surface)s; }
     QFrame#appHeader { border-bottom:1px solid %(divider)s; }
-    QFrame#commandBar { border:1px solid %(divider)s; border-radius:10px; }
+    QFrame#commandBar { border:1px solid %(divider)s; border-radius:14px; background:%(canvas)s; }
+    QFrame#commandSection { background:%(surface)s; border:1px solid %(divider)s; border-radius:10px; }
+    QFrame#commandSection:hover { border-color:%(faint)s; }
+    QFrame#commandDivider { background:%(divider)s; }
+    QLabel#commandEyebrow { color:%(accent)s; font-size:10px; font-weight:700; letter-spacing:1.1px; }
+    QLabel#commandTitle { color:%(text)s; font-size:12px; font-weight:600; }
     QFrame#inspector, QFrame#viewportCard { border:1px solid %(divider)s; border-radius:10px; }
     QFrame#statCard { border:1px solid %(divider)s; border-radius:9px; }
     QLabel { background:transparent; border:0; }
     QLabel#brand { font-size:20px; font-weight:600; }
-    QLabel#brandEdition { color:%(muted)s; font-size:11px; letter-spacing:2px; }
+    QLabel#brandEdition { color:%(muted)s; font-size:11px; letter-spacing:1.5px; }
     QLabel#pageTitle { font-size:21px; font-weight:600; }
     QLabel#sectionTitle { font-size:14px; font-weight:600; }
     QLabel#sectionEyebrow { color:%(muted)s; font-size:11px; }
@@ -46,11 +51,11 @@ def stylesheet(name):
     QFrame#compactStat { background:transparent; border:0; }
     QLabel#statUnit { color:%(muted)s; font-size:12px; }
     QLabel#statusBanner[tone="error"] { color:%(danger)s; }
-    QLabel#badge { background:%(elevated)s; color:%(muted)s; border:1px solid %(divider)s; border-radius:5px; padding:4px 8px; font-size:11px; font-weight:600; }
+    QLabel#badge { background:%(elevated)s; color:%(muted)s; border:1px solid %(divider)s; border-radius:980px; padding:5px 10px; font-size:11px; font-weight:600; }
     QLabel#badge[tone="accent"] { background:%(accent_soft)s; color:%(accent)s; border:0; }
     QLabel#badge[tone="warning"] { background:%(warning_soft)s; color:%(warning)s; border:0; }
     QLabel#badge[tone="error"] { background:%(danger_soft)s; color:%(danger)s; border:0; }
-    QPushButton, QToolButton { background:%(elevated)s; color:%(text)s; border:1px solid %(border)s; border-radius:6px; padding:7px 12px; min-height:22px; font-weight:500; }
+    QPushButton, QToolButton { background:%(elevated)s; color:%(text)s; border:1px solid %(border)s; border-radius:980px; padding:7px 13px; min-height:22px; font-weight:500; }
     QPushButton:hover, QToolButton:hover { border-color:%(faint)s; background:%(divider)s; }
     QPushButton:pressed, QToolButton:pressed { background:%(input)s; }
     QPushButton:checked, QToolButton:checked { color:%(accent)s; background:%(accent_soft)s; border-color:%(accent)s; }

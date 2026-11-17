@@ -15,6 +15,7 @@ from ..vio.trajectory import load_euroc_trajectory,load_tum_body_ground_truth,al
 from ..vio.localization_state import consumer_map_pose
 from ..vio.local_segments import consumer_display_pose,display_reference_key
 from ..vio.display_pose import BestEffortPoseSelector
+DISPLAY_WORLD_ROTATION=np.array([[1.,0.,0.],[0.,0.,1.],[0.,-1.,0.]])
 
 NAVIGATION_ROOT=ROOT/'samples'/'date'/'VIO'
 WORLD_AXIS_LENGTH_M=.25
@@ -60,8 +61,21 @@ class TrajectoryView(gl.GLViewWidget):
         self.setMinimumHeight(220);self.setAccessibleName('相机三维轨迹')
         self.trajectory_items=[];self.setBackgroundColor('#0E141D')
         self.axis_items=[];self.hand_items=[]
-        self.grid=gl.GLGridItem();self.grid.setSize(2,2);self.grid.setSpacing(.25,.25);self.addItem(self.grid)
+        self.grid=gl.GLGridItem();self.grid.setSize(2,2);self.grid.setSpacing(.25,.25)
+        # Keep the reference/ground plane in the default horizontal XY plane.
+        # Its display-only elevation is near the feet; the W origin/axes stay
+        # at the mathematical default origin.
+        self.grid.translate(0., 0., -1.8)
+        self.addItem(self.grid)
         self.reset_camera()
+    def prepare_paint(self):
+        callback=getattr(self,'before_paint',None)
+        if callback is not None:callback()
+
+    def paintGL(self,*args,**kwargs):
+        self.prepare_paint()
+        return super().paintGL(*args,**kwargs)
+
     def reset_camera(self):
         self.setCameraPosition(distance=max(.5,self.opts.get('distance',3.)),elevation=35,azimuth=-55)
     def zoom_by(self,factor):
@@ -78,10 +92,19 @@ class TrajectoryView(gl.GLViewWidget):
     def set_pose_axes(self,pose,*,show_world=True):
         for item in self.axis_items:self.removeItem(item)
         self.axis_items=[]
-        for transform,length,prefix,width in ((np.eye(4),WORLD_AXIS_LENGTH_M,'W',2),
+        # Restore the standard right-handed world display: X right, Y up,
+        # Z forward.  The ground grid is the perpendicular XZ plane.
+        world_axis = np.eye(4)
+        for transform,length,prefix,width in ((world_axis,WORLD_AXIS_LENGTH_M,'W',2),
                                                (pose,CAMERA_AXIS_LENGTH_M,'C',3)):
             if transform is None or (prefix=='W' and not show_world):continue
-            points=pose_axes(transform,length)
+            if prefix == 'W':
+                points = np.vstack((np.zeros(3),
+                                    [[length, 0., 0.], [0., length, 0.], [0., 0., length]]))
+                points=points@DISPLAY_WORLD_ROTATION.T
+            else:
+                points=pose_axes(transform,length)
+                points=points@DISPLAY_WORLD_ROTATION.T
             for axis,color in enumerate(AXIS_COLORS):
                 item=gl.GLLinePlotItem(pos=points[[0,axis+1]],color=color,width=width,antialias=True,glOptions='translucent')
                 self.addItem(item);self.axis_items.append(item)
@@ -97,11 +120,12 @@ class TrajectoryView(gl.GLViewWidget):
         for points,enabled,color,breaks,marker,active_index in (
             (estimated,estimate_on,(.20,.87,.74,1.),estimate_breaks,False,index),
             (truth,truth_on,(.85,.42,1.,1.),(),True,index),
-            (prediction,prediction_on,(1.0,.62,.18,1.),prediction_breaks,True,prediction_index),
-            (candidate,candidate_on,(1.0,.90,.25,1.),candidate_breaks,True,candidate_index),
+            (prediction,prediction_on,(.376,.647,.980,1.),prediction_breaks,True,prediction_index),
+            (candidate,candidate_on,(.957,.447,.714,1.),candidate_breaks,True,candidate_index),
         ):
             if not enabled or not len(points):continue
             points=np.asarray(points,dtype=float);all_points.append(points)
+            points=points@DISPLAY_WORLD_ROTATION.T
             line_points=points
             mode='line_strip'
             if breaks:
@@ -142,7 +166,7 @@ class TrajectoryView(gl.GLViewWidget):
             if edges:
                 line=gl.GLLinePlotItem(pos=np.concatenate(edges),mode='lines',color=color,width=2,antialias=True)
                 self.addItem(line);self.hand_items.append(line)
-            dots=gl.GLScatterPlotItem(pos=points[valid],color=color,size=7,pxMode=True)
+            dots=gl.GLScatterPlotItem(pos=points[valid],color=color,size=.012,pxMode=False)
             self.addItem(dots);self.hand_items.append(dots)
 
     def fit_geometry(self,extra_points=()):
@@ -169,6 +193,8 @@ class VioPanel(QWidget):
         super().__init__(parent)
         self.poses=[];self.truth=[];self.calibration=None;self.calibration_path=None;self.alignment=None
         self._live_previous=None
+        self._trajectory_history=[]
+        self._history_window=None
         self._display_selector=BestEffortPoseSelector()
         self._display_pose=None
         self._live_session_active=False
@@ -188,16 +214,19 @@ class VioPanel(QWidget):
         load=QPushButton('导入估计');load.setToolTip('导入 ORB-SLAM3 双目惯性体轨迹；需先在标定区加载相机—IMU 标定。');load.clicked.connect(self.import_trajectory)
         gt=QPushButton('导入真值');gt.setToolTip('导入 TUM 格式、秒时间戳的 IMU 体坐标真值轨迹。');gt.clicked.connect(self.import_truth)
         clear=QPushButton('清除');clear.clicked.connect(self.clear)
+        self.history_button=QPushButton('历史轨迹（0）');self.history_button.setEnabled(False)
+        self.history_button.setToolTip('参考更新或地图重置前的轨迹单独保留回看，不与当前坐标拼接。')
+        self.history_button.clicked.connect(self.show_trajectory_history)
         self.live_enabled=QCheckBox('实时 VIO（实验）');self.live_enabled.setChecked(True)
         self.live_enabled.setToolTip('采集前设置；实时结果使用设备时钟和待验证的 IMU 数据布局。')
         self.live_profile=QComboBox();self.live_profile.setAccessibleName('实时 VIO Profile')
         self.live_profile.addItem('正式稳定版','stable')
-        self.live_profile.addItem('v4 实时恢复实验版','v4')
+        self.live_profile.addItem('v4 实时恢复 · 交付 R1','v4')
         self.live_profile.setCurrentIndex(self.live_profile.findData('v4'))
-        self.live_profile.setToolTip('默认使用隔离 v4 实验候选；可选择正式稳定版回退。')
+        self.live_profile.setToolTip('默认使用 v4 交付 R1；原正式稳定版仍可选择。')
         self.show_estimate=QCheckBox('拟合 / 估计');self.show_estimate.setChecked(True)
         self.show_truth=QCheckBox('真值');self.show_truth.setChecked(True)
-        for widget in (load,gt,clear,self.show_estimate,self.show_truth,self.live_enabled,self.live_profile):controls.addWidget(widget)
+        for widget in (load,gt,clear,self.history_button,self.show_estimate,self.show_truth,self.live_enabled,self.live_profile):controls.addWidget(widget)
         controls.addStretch();layout.addLayout(controls)
         comparison_controls=QHBoxLayout()
         self.compare_native=QCheckBox('原生 / 界面对比')
@@ -223,7 +252,7 @@ class VioPanel(QWidget):
         self.preview.installEventFilter(self);self.raw_preview.installEventFilter(self)
         self.compare_native.toggled.connect(self._toggle_native_comparison)
         self.fit_comparison.clicked.connect(self._fit_native_comparison)
-        legend=QLabel('参考坐标 W（回放时为当前局部段） · 相机坐标 C（左相机光学系） · X 红 / Y 绿 / Z 蓝')
+        legend=QLabel('参考坐标 W（回放时为当前局部段） · 相机坐标 C（左相机光学系） · X 红 / Y 绿 / Z 蓝');self.coordinate_legend=legend
         legend.setWordWrap(True);layout.addWidget(legend)
         map_controls=QHBoxLayout()
         self.load_map=QPushButton('导入预扫地图');self.load_map.clicked.connect(self.import_map)
@@ -423,6 +452,7 @@ class VioPanel(QWidget):
                     self.preview.addItem(item);self.map_layers[name]=item
             return
         if kind=='vio_reset':
+            self._archive_trajectory('进程重启')
             self._reset_raw_comparison()
             # 进程重启后使用新的地图坐标系，不能与旧轨迹直接拼接。
             self.poses=[];self.alignment=None;self._live_map_epoch=None;self._live_display_segment=None
@@ -481,9 +511,11 @@ class VioPanel(QWidget):
         # still belong to the same map for bounded IMU prediction.
         epoch=world_identity(message)
         motion_identity=message.get('local_motion') or {}
-        segment=message.get('display_segment') or (
-            motion_identity.get('segment_id') if motion_identity.get('status') == 'estimated' else None)
+        segment=message.get('display_segment')
+        if segment is None and motion_identity.get('status') == 'estimated':
+            segment=motion_identity.get('segment_id')
         if epoch is not None and self._live_map_epoch is not None and epoch!=self._live_map_epoch:
+            self._archive_trajectory('参考更新')
             self.poses=[];self.alignment=None
             self._reset_live_path()
             self.slider.setEnabled(False);self.slider.setRange(0,0)
@@ -571,23 +603,33 @@ class VioPanel(QWidget):
                 f'当前段 {len(self.poses)} 帧 · 新旧段独立 · 位姿精度待验证')
 
     def set_hand_result(self,result):
-        pose=result.diagnostics.get('vio_pose')
-        transform=consumer_display_pose(pose,world_hands=True,expected_timestamp_ns=result.timestamp_ns)
+        from ..vio.hand_pose_binding import consumer_result_display_pose
+        transform=consumer_result_display_pose(result)
         self.preview.set_hands(result.hands,transform)
 
-    def show_recorded(self,results,index,*,show_hands=True):
+    def show_recorded(self,results,index,*,show_hands=True,incremental=False):
         """Build one segment once per seek, without inference or per-frame redraw."""
         from ..vio.trajectory import OfflinePose
+        from ..vio.hand_pose_binding import consumer_result_display_pose
+        if incremental and getattr(self,'_recorded_sequence',None) is results and index==getattr(self,'_recorded_index',-2)+1:
+            current=results[index].diagnostics.get('vio_pose') or results[index].diagnostics.get('live_vio_pose')
+            if isinstance(current,dict) and current.get('timestamp_ns') == results[index].timestamp_ns and current.get('type') == 'pose':
+                self.update_live(current)
+                if show_hands:self.set_hand_result(results[index])
+                self._recorded_index=index
+                return
         self.clear();self.begin_live()
-        current=results[index].diagnostics.get('vio_pose')
+        self._recorded_sequence=results;self._recorded_index=index
+        current=results[index].diagnostics.get('vio_pose') or results[index].diagnostics.get('live_vio_pose')
         if not isinstance(current,dict):
             self.preview.set_hands([],None);return
         key=display_reference_key(current)
         selected=[];breaks=[];gap=False
         for result in results[:index+1]:
-            pose=result.diagnostics.get('vio_pose')
+            pose=result.diagnostics.get('vio_pose') or result.diagnostics.get('live_vio_pose')
             if not isinstance(pose,dict) or display_reference_key(pose)!=key:continue
-            transform=consumer_display_pose(pose,expected_timestamp_ns=result.timestamp_ns if 'local_motion' in pose else None)
+            transform=(consumer_result_display_pose(result) if 'live_vio_pose' in result.diagnostics else
+                consumer_display_pose(pose,expected_timestamp_ns=result.timestamp_ns if 'local_motion' in pose else None))
             if transform is None:gap=True;continue
             if gap and selected:breaks.append(len(selected))
             gap=False
@@ -597,7 +639,9 @@ class VioPanel(QWidget):
         self.slider.blockSignals(True);self.slider.setRange(0,max(0,len(selected)-1))
         self.slider.setValue(max(0,len(selected)-1));self.slider.blockSignals(False)
         self._update_view(fit=True)
-        if consumer_display_pose(current,expected_timestamp_ns=results[index].timestamp_ns) is None:
+        current_transform=(consumer_result_display_pose(results[index]) if 'live_vio_pose' in results[index].diagnostics else
+            consumer_display_pose(current,expected_timestamp_ns=results[index].timestamp_ns))
+        if current_transform is None:
             self.preview.set_pose_axes(None)
         self.live_pose_readout.emit(live_camera_pose_text(current))
         motion=current.get('local_motion') or {}
@@ -607,6 +651,31 @@ class VioPanel(QWidget):
         if show_hands:self.set_hand_result(results[index])
         self.preview.fit_geometry()
         if show_hands:QTimer.singleShot(0,self.preview.fit_geometry)
+
+    def _archive_trajectory(self,reason):
+        if not self.poses:return
+        from .trajectory_history import TrajectorySnapshot
+        self._trajectory_history.append(TrajectorySnapshot.capture(
+            self._live_map_epoch,self.poses,self._live_breaks,reason))
+        self.history_button.setText(f'历史轨迹（{len(self._trajectory_history)}）')
+        self.history_button.setEnabled(True)
+        if self._history_window is not None:
+            self._history_window.set_entries(self._trajectory_history)
+
+    def show_trajectory_history(self):
+        if not self._trajectory_history:return
+        from .trajectory_history import TrajectoryHistoryDialog
+        if self._history_window is None:
+            self._history_window=TrajectoryHistoryDialog(self)
+        self._history_window.set_entries(self._trajectory_history)
+        self._history_window.show();self._history_window.raise_()
+
+    def _clear_trajectory_history(self):
+        self._trajectory_history=[]
+        if self._history_window is not None:
+            self._history_window.close()
+            self._history_window.set_entries(())
+        self.history_button.setText('历史轨迹（0）');self.history_button.setEnabled(False)
 
     def _reset_live_path(self):
         self._recorded_details=None
@@ -627,6 +696,7 @@ class VioPanel(QWidget):
             self.update_map.setChecked(False);self.update_map.setEnabled(False)
 
     def begin_live(self,*,preset=False):
+        self._clear_trajectory_history()
         self._live_session_active=True
         self.live_pose_readout.emit('相机 6D 位姿 · 等待实时 VIO')
         # 新会话不和先前导入/采集的位姿或真值拼成一条轨迹。
@@ -650,6 +720,7 @@ class VioPanel(QWidget):
         self.preview.zoom_by(factor);self._sync_comparison_camera()
     def reset_camera(self):self._update_view(fit=True)
     def clear(self):
+        self._clear_trajectory_history()
         self._live_session_active=False
         self.live_pose_readout.emit('相机 6D 位姿 · 当前不可用')
         self.poses=[];self.truth=[];self.alignment=None

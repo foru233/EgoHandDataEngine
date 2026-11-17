@@ -248,7 +248,7 @@ def _new_stats(stats):
     return stats
 
 
-def iter_paired_frames(root, limit=None, stats=None, *, stride=1):
+def iter_paired_frames(root, limit=None, stats=None, *, stride=1, min_device_ts=None, cancelled=None):
     """Decode all HEVC packets; convert and yield every stride-th paired frame.
 
     Indices refer to the original paired stream, and limit counts yielded pairs.
@@ -279,7 +279,13 @@ def iter_paired_frames(root, limit=None, stats=None, *, stride=1):
     pending = {}
     produced = 0
     yielded = 0
+    clip = _read_manifest(root).get('sdk_clip') or {}
+    clip_start = int(clip.get('start_pair_index', 0))
+    clip_end = clip.get('end_pair_index')
+    if clip_start < 0 or (clip_end is not None and int(clip_end) < clip_start):
+        raise RecordingFormatError('SDK 截取范围无效')
     for record in iter_sdk_records(path):
+        if cancelled is not None and cancelled():return
         if record.sink not in CAMERA_SINKS:
             continue
         counters["camera_packets"][str(record.sink)] += 1
@@ -303,6 +309,19 @@ def iter_paired_frames(root, limit=None, stats=None, *, stride=1):
                 index = produced
                 produced += 1
                 counters["paired_frames"] = produced
+                if index < clip_start:
+                    while len(pending) > _PENDING_PAIR_LIMIT:
+                        del pending[next(iter(pending))]
+                        counters["pending_pair_drops"] += 1
+                    continue
+                if clip_end is not None and index > int(clip_end):
+                    return
+                index -= clip_start
+                if min_device_ts is not None and left_record.device_ts < min_device_ts:
+                    while len(pending) > _PENDING_PAIR_LIMIT:
+                        del pending[next(iter(pending))]
+                        counters["pending_pair_drops"] += 1
+                    continue
                 if index % stride:
                     while len(pending) > _PENDING_PAIR_LIMIT:
                         del pending[next(iter(pending))]

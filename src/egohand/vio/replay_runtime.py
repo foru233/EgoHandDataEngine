@@ -16,6 +16,7 @@
 本模块只写 `<output_dir>`，不写实时日志目录。
 """
 from __future__ import annotations
+from .stereo_transport import negotiate as negotiate_stereo
 
 from dataclasses import replace
 import json
@@ -156,6 +157,7 @@ class ReplayBridge:
         self._lock = threading.Lock()
         self.settings_path = None if settings_path is None else Path(settings_path).resolve()
         self.recovery_protocol = 1
+        self.shared_transport = None
         if self.mode=='hybrid':
             from .hybrid_settings import visual_bootstrap_settings
             if self.settings_path is None:
@@ -229,8 +231,10 @@ class ReplayBridge:
         if message.get('type') != 'ready':
             raise RuntimeError(message.get('message', 'VIO 初始化失败'))
         self.recovery_protocol=negotiate_recovery(message,
-            requested=int(os.environ.get('EGOHAND_VIO_RECOVERY_PROTOCOL',str(PROTOCOL))),
-            enabled=self.coordinated_stereo or (self.mode!='stereo' and os.environ.get('EGOHAND_VIO_DISABLE_RECOVERY')!='1'))
+            requested=int(self.environment.get('EGOHAND_VIO_RECOVERY_PROTOCOL',os.environ.get('EGOHAND_VIO_RECOVERY_PROTOCOL',str(PROTOCOL)))),
+            enabled=self.coordinated_stereo or (self.mode!='stereo' and self.environment.get('EGOHAND_VIO_DISABLE_RECOVERY',os.environ.get('EGOHAND_VIO_DISABLE_RECOVERY'))!='1'))
+        self.shared_transport=negotiate_stereo(message,self.recovery_protocol,
+            requested=self.environment.get('EGOHAND_VIO_SHARED_STEREO',os.environ.get('EGOHAND_VIO_SHARED_STEREO'))=='1')
 
     def _read_message(self):
         length = struct.unpack('<I', _recv(self.sock, 4))[0]
@@ -243,8 +247,10 @@ class ReplayBridge:
             raise ReplayCancelled()
         _send_tracking_frame(self.sock, stamp, left_gray, right_gray, measurements,
                              recovery_protocol=self.recovery_protocol,
-                             reset_imu_alignment=reset_imu_alignment)
+                             reset_imu_alignment=reset_imu_alignment,shared_transport=self.shared_transport)
         result = self._read_message()
+        if self.shared_transport is not None and result.get('image_transport')!='shared_memory_v1':
+            raise RuntimeError('worker did not confirm shared stereo input')
         if result.get('type') == 'error':
             raise RuntimeError(result.get('message') or 'VIO 子进程返回错误')
         return result
@@ -268,6 +274,9 @@ class ReplayBridge:
         self._shutdown_socket()
         with self._lock:
             self._reap()
+            if self.shared_transport is not None:
+                self.shared_transport.close()
+                self.shared_transport=None
 
     def _shutdown_socket(self):
         sock, self.sock = self.sock, None

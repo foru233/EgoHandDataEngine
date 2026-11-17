@@ -19,6 +19,7 @@ from ..sources.hot3d import HOT3DFrameProcessor
 from ..sources.show3d import SHOW3DFrameProcessor
 from ..detection.mediapipe_detector import MediaPipeHandDetector
 from ..detection.roi import validate_roi
+from .shared.hand_presentation import HandPresentationSnapshot
 
 def _publish_frame(source_type, rectifier, frame):
     """实时相机已启用校正时，失败帧不能让预览在原图和校正图之间闪动。"""
@@ -26,6 +27,7 @@ def _publish_frame(source_type, rectifier, frame):
 
 # 工作线程向 GUI 发信号，不直接操作界面控件；命令队列串行应用模型/录制设置。
 class PipelineWorker(QThread):
+    localized_hand_result=Signal(object)
     vio_status=Signal(dict)
     hot3d_mode_applied=Signal(str)
     error=Signal(str)
@@ -36,7 +38,7 @@ class PipelineWorker(QThread):
     roi_settings_applied=Signal(dict,str)
     roi_settings_failed=Signal(str)
     recording_state_changed=Signal(bool,bool,str)
-    def __init__(self,source,config=None,detector_config=None,calibration=None,offline=False,parent=None,rois=None,live_vio=False,*,vio_worker=None,preset_map=None,vio_mode="stereo_inertial",vio_output_dir=None,vio_config_snapshot=None,vio_library_path=None,vio_environment=None,coordinated_stereo=False):
+    def __init__(self,source,config=None,detector_config=None,calibration=None,offline=False,parent=None,rois=None,live_vio=False,*,vio_worker=None,preset_map=None,vio_mode="stereo_inertial",vio_output_dir=None,vio_config_snapshot=None,vio_library_path=None,vio_environment=None,coordinated_stereo=False,save_depth=False):
         from ..vio.modes import validate_mode
         self.vio_mode=validate_mode(vio_mode)
         super().__init__(parent)
@@ -48,6 +50,7 @@ class PipelineWorker(QThread):
         self.vio_library_path=vio_library_path
         self.vio_environment=dict(vio_environment or {})
         self.coordinated_stereo=bool(coordinated_stereo)
+        self.save_depth=bool(save_depth)
         self.preset_map=preset_map
         self.hot3d_mode=getattr(source,"view_mode","prediction");self.hot3d_processor=HOT3DFrameProcessor();self.show3d_processor=SHOW3DFrameProcessor()
         self.offline=offline
@@ -66,6 +69,14 @@ class PipelineWorker(QThread):
         self._recorded_world_join=None
         self._recorded_world_join_error=None
         self._live_world_join=None
+        self.hand_presentation=HandPresentationSnapshot()
+        from ..visualization.display_smoothing import DisplaySmoother
+        from ..vio.hand_identity_stabilizer import HandIdentityStabilizer
+        self._recorded_hand_filter=DisplaySmoother()
+        self._recorded_hand_identity=HandIdentityStabilizer()
+        # The record-writing candidate remains opt-in until accuracy and
+        # identity continuity are independently verified on recorded data.
+        self._hand_filter_enabled=False
         self._live_pose_mailbox=queue.Queue(maxsize=64)
         self._live_pose_mailbox_overflow=threading.Event()
         self.capture_thread=None;self.engine=None;self.last_error=None
@@ -93,7 +104,12 @@ class PipelineWorker(QThread):
         recorder=self.recorder
         active=bool(recorder and recorder.accepting)
         self.recording_state_changed.emit(active,bool(active and recorder.paused),message)
+    def _publish_localized_hand(self,result):
+        self.hand_presentation.publish_pair(result)
+        self.localized_hand_result.emit(result)
+
     def _vio_status(self,result):
+        self.hand_presentation.publish_pose(result)
         if getattr(self,'_live_world_join',None) is not None and result.get('type') in ('pose','vio_reset'):
             try:self._live_pose_mailbox.put_nowait(copy.deepcopy(result))
             except queue.Full:self._live_pose_mailbox_overflow.set()
@@ -114,7 +130,11 @@ class PipelineWorker(QThread):
                 if (previous.session_id,previous.frame_id,previous.timestamp_ns)==(
                         result.session_id,result.frame_id,result.timestamp_ns):
                     previous.world_hands=copy.deepcopy(result.world_hands)
+                    previous.local_motion=copy.deepcopy(result.local_motion)
+                    previous.segment_hands=copy.deepcopy(result.segment_hands)
                     previous.diagnostics={**previous.diagnostics,'live_world_join_finalized':True}
+                    if 'live_vio_pose' in result.diagnostics:
+                        previous.diagnostics['live_vio_pose']=copy.deepcopy(result.diagnostics['live_vio_pose'])
                     frame=getattr(self.engine,'last_frame',None)
                     if (self.history[-1] is previous and frame is not None
                             and frame.frame_id==previous.frame_id and frame.timestamp_ns==previous.timestamp_ns):
@@ -246,7 +266,11 @@ class PipelineWorker(QThread):
             try: name,value=self.commands.get_nowait()
             except queue.Empty: break
             try:
-                if name in ('use_epipolar_error','use_reprojection_error','enable_3d_tracking'):
+                if name == 'hand_filter':
+                    self._hand_filter_enabled=bool(value)
+                    self._recorded_hand_filter.reset();self._recorded_hand_identity.reset()
+                    if self.recorder:self.recorder.submit('event',{'event':'hand_filter_changed','enabled':bool(value),'time_ns':time.time_ns()},self.offline)
+                elif name in ('use_epipolar_error','use_reprojection_error','enable_3d_tracking'):
                     self.engine.config[name]=bool(value)
                     self.engine.reset_tracking()
                     if self.pause_event.is_set() and self.last_input_frame is not None:
@@ -350,12 +374,20 @@ class PipelineWorker(QThread):
         from ..core.types import serializable
         from ..vio.hand_world import RecordedLocalizationHandJoin
         output=Path(self.vio_output_dir) if self.vio_output_dir else ROOT/'userrr'/'results'/f'replay_{time.time_ns()}'
+        if self.save_depth and (output/'depth_results.sqlite3').exists():
+            raise FileExistsError('输出目录已有深度结果，请选择新目录')
         (output/'results').mkdir(parents=True,exist_ok=True)
         effective_calibration=getattr(self.engine,'calibration',None)
         if effective_calibration is not None:
             from ..calibration.loader import save_calibration
             save_calibration(effective_calibration,output/'processing_calibration.yaml')
         result_file=(output/'results'/'frames.jsonl').open('w',encoding='utf8',buffering=1)
+        depth_writer=None
+        if self.save_depth:
+            from ..storage.depth_results import DepthResultWriter
+            try:depth_writer=DepthResultWriter(output,effective_calibration,input_pixels='original_recording_decode')
+            except Exception:
+                result_file.close();raise
         try:
             self._recorded_world_join=RecordedLocalizationHandJoin.from_recording(
                 self.source.recording_dir, getattr(self.engine,'calibration',None),
@@ -389,6 +421,8 @@ class PipelineWorker(QThread):
                             'acquired_perf_counter_ns':time.perf_counter_ns()}
             self.read_count+=1
             result=self._process_frame(frame,started)
+            if depth_writer is not None:
+                result.diagnostics['stereo_depth']=depth_writer.write(frame)
             result_file.write(json.dumps(serializable(result),ensure_ascii=False,allow_nan=False)+'\n')
             self.step_event.clear()
         replay_options={'continue_on_localization_error':True}
@@ -403,6 +437,8 @@ class PipelineWorker(QThread):
             report=self.replay_vio.run()
         finally:
             result_file.close()
+            if depth_writer is not None:
+                depth_writer.close(output/'results'/'frames.jsonl',completed=report.get('status')=='completed')
             self.replay_vio=None
             self._recorded_world_join=None
             self._recorded_world_join_error=None
@@ -411,6 +447,7 @@ class PipelineWorker(QThread):
                 'mode':self.vio_mode,'status':report.get('status','failed'),
                 'error':report.get('error'),'result_count':self.processed,
                 'result_index':'results/frames.jsonl','raw_images':'original_recording (read-only)',
+                **({'stereo_depth':dict(depth_writer.metadata,file='depth_results.sqlite3')} if depth_writer is not None else {}),
             },ensure_ascii=False,allow_nan=False,indent=2),encoding='utf8')
         if report.get('status') in ('failed','completed_with_localization_failure'):
             self.last_error=report.get('error') or '录制定位处理失败'
@@ -435,6 +472,11 @@ class PipelineWorker(QThread):
             if self.source.get_metadata().source_type=='dexycb':
                 pairing={'dataset_id':'dexycb','sync_quality':'DATASET_DOCUMENTED','pair_id':frame.metadata['dataset_pair_id'],'source':frame.metadata['synchronization_evidence']}
             result=self.engine.process(frame,dataset_pairing=pairing)
+        if self._hand_filter_enabled:
+            stable,_=self._recorded_hand_identity.update(result.hands,result.timestamp_ns)
+            result=replace(result,hands=[replace(h.source,handedness=h.handedness) for h in stable])
+            result=self._recorded_hand_filter.update(result)
+            result=replace(result,diagnostics={**result.diagnostics,'hand_filter':{'enabled':True,'method':'one_euro','missing_points':'invalid'}})
         if frame.metadata.get('vio_pose') is not None:
             result.diagnostics['vio_pose']=frame.metadata['vio_pose']
             if self._recorded_world_join is not None:
@@ -538,7 +580,8 @@ class PipelineWorker(QThread):
                     and self.engine.calibration is not None):
                 from ..vio.live_hand_join import LiveLocalizationHandJoin
                 self._live_world_join=LiveLocalizationHandJoin(self.engine.calibration,
-                    source_session_id=self.live_vio.source_session_id)
+                    source_session_id=self.live_vio.source_session_id,
+                    on_exact_pair=self._publish_localized_hand)
             if self.detector_config and not (self.source.get_metadata().source_type in ("hot3d_clips","show3d") and self.hot3d_mode=="ground_truth"):
                 try: self._new_detectors()
                 except Exception as e: self.error.emit(f"Model Not Loaded: {e}")

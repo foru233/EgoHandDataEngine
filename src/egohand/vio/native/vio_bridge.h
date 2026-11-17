@@ -84,6 +84,18 @@ EGOHAND_VIO_API int32_t EGOHAND_VIO_CALL egohand_vio_snapshot_size(void);
 EGOHAND_VIO_API int EGOHAND_VIO_CALL egohand_vio_get_frame_snapshot(
     void* handle, EgohandVioFrameSnapshot* out_snapshot, int32_t out_size);
 
+/* Immutable reference identity paired with the latest frame snapshot. */
+typedef struct EgohandVioReferenceFrame {
+    uint32_t schema_version, struct_size;
+    uint64_t frame_id, map_id, reset_id, atlas_generation;
+    uint64_t generation, operation_sequence, geometry_sequence, map_revision, map_change_index;
+    int64_t timestamp_ns;
+    uint32_t snapshot_consistent, frame_bound;
+} EgohandVioReferenceFrame;
+EGOHAND_VIO_API int32_t EGOHAND_VIO_CALL egohand_vio_reference_frame_size(void);
+EGOHAND_VIO_API int EGOHAND_VIO_CALL egohand_vio_get_reference_frame(
+    void* handle, EgohandVioReferenceFrame* out_reference, int32_t out_size);
+
 /* Diagnostic-only partial journal. map_update_lock_matches_caller checks only
    pointer equality with the caller's claimed locked map, not mutex ownership.
    coverage=1 never establishes that the
@@ -175,11 +187,9 @@ typedef int (EGOHAND_VIO_CALL *EgohandRecoveryCallback)(const float* Twb16, uint
 EGOHAND_VIO_API int EGOHAND_VIO_CALL egohand_vio_set_recovery_callback(
     void* handle, EgohandRecoveryCallback callback, void* context);
 
-/* Optional short-recovery geometry ABI marker.
-   The current bridge deliberately reports unavailable until an independent
-   native stereo/map geometry solver is wired in.  Presence of this export
-   lets the recovery worker fail closed with a structured unavailable result
-   instead of silently selecting a legacy DLL. */
+/* Optional short-recovery geometry report.  The report is frame-bound native
+   stereo/map evidence and remains unavailable until the tracking snapshot has
+   enough valid associations. */
 EGOHAND_VIO_API const char* EGOHAND_VIO_CALL egohand_vio_short_recovery_report(void);
 
 EGOHAND_VIO_API int EGOHAND_VIO_CALL egohand_vio_create(

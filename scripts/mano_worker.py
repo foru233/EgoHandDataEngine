@@ -8,7 +8,9 @@ import traceback
 from pathlib import Path
 
 ROOT=Path(__file__).resolve().parents[1]
-sys.path.insert(0,str(ROOT/'tools'/'mano_deps'))
+# Keep the Torch environment's compiled NumPy first; the vendored MANO
+# dependencies provide smplx/chumpy without shadowing that ABI.
+sys.path.append(str(ROOT/'tools'/'mano_deps'))
 import numpy as np
 
 # 官方旧版模型文件含 Chumpy 对象，加载时提供兼容别名，不修改主进程。
