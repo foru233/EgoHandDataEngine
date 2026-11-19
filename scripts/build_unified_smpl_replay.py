@@ -17,7 +17,8 @@ from egohand.storage.replay import load_recorded_results
 from egohand.vio.hand_pose_binding import consumer_result_display_pose
 from egohand.vio.local_segments import display_reference_key
 from egohand.body.smpl_runtime import GroundReference,STANDING_FOREHEAD_HEIGHT_M
-from egohand.body.smpl_mount import HEAD_ANCHOR_VERSION
+from egohand.body.smpl_mount import (HEAD_ANCHOR_VERSION, DEFAULT_CAMERA_FOREHEAD_OFFSET_MM,
+                                    camera_forehead_offset_m, forehead_target)
 
 from egohand.body.smpl_binding import attach_mano,rejection_reasons,mesh_asset
 
@@ -28,6 +29,7 @@ def main():
     ap.add_argument('--iterations',type=int)
     ap.add_argument('--ground-y-m',type=float,help='Explicit floor Y in body world; otherwise infer per segment')
     ap.add_argument('--initial-camera-height-m',type=float,default=STANDING_FOREHEAD_HEIGHT_M,help='Camera-to-floor distance at segment initialization (default: standing 1.75 m SMPL forehead)')
+    ap.add_argument('--camera-forehead-offset-mm',type=float,default=DEFAULT_CAMERA_FOREHEAD_OFFSET_MM)
     ap.add_argument('--in-place',action='store_true',help='Add only new derived artifacts to a newly computed result directory')
     ap.add_argument('--mano',action='store_true',help='Fit missing MANO meshes using the existing configured fitter')
     ap.add_argument('--strict-body',action='store_true',help='Only publish body on frames with head pose and both observed wrists')
@@ -46,6 +48,7 @@ def main():
         (dest/'results').mkdir()
         for name in ['results/frames.jsonl','processing_calibration.yaml','reprocessing.json','display_cache.sqlite3','depth_results.sqlite3']:
             if (source/name).is_file():os.link(source/name,dest/name)
+    offset_m=camera_forehead_offset_m(args.camera_forehead_offset_mm)
     smpl=SmplBody();solver=UnifiedSmpl(smpl.model)
     n=len(results)
     verts=np.lib.format.open_memmap(dest/'smpl_vertices.npy',mode='w+',dtype=np.float32,shape=(n,6890,3))
@@ -73,11 +76,12 @@ def main():
                         directions[hand.handedness.lower()]=T[:3,:3]@(d/np.linalg.norm(d))
         ref=display_reference_key(r.diagnostics.get('vio_pose') or r.diagnostics.get('live_vio_pose') or {})
         ground=args.ground_y_m if args.ground_y_m is not None else floor_reference.floor_for(r) if floor_reference else None
-        fit=solver.fit(T[:3,3],T[:3,:3],wrists,ref,iterations=args.iterations,
+        target=forehead_target(T,offset_m)
+        fit=solver.fit(target,T[:3,:3],wrists,ref,iterations=args.iterations,
                        ground_y_m=ground,hand_directions=directions)
         reasons=rejection_reasons(fit)
         if reasons:
-            fit=solver.fit(T[:3,3],T[:3,:3],wrists,ref,iterations=max(args.iterations or 0,100),
+            fit=solver.fit(target,T[:3,:3],wrists,ref,iterations=max(args.iterations or 0,100),
                            ground_y_m=ground,hand_directions=directions)
             reasons=rejection_reasons(fit)
         if reasons:
@@ -91,7 +95,8 @@ def main():
         poses[i]=fit['body_pose'];orient[i]=fit['global_orient'];trans[i]=fit['transl']
         diag={'source':'single_pose_smpl','model':'SMPL_NEUTRAL','unobserved_body':'conservative_pose_prior',
             'head_rotation_world':T[:3,:3].tolist(),'ground_y_m':fit['ground_y_m'],
-            'head_anchor':'camera_at_template_forehead_midpoint','head_anchor_vertex':fit['head_anchor_vertex'],
+            'head_anchor':'camera_mount_offset_optical_y','head_anchor_vertex':fit['head_anchor_vertex'],
+            'camera_forehead_offset_mm':args.camera_forehead_offset_mm,
             'head_anchor_version':HEAD_ANCHOR_VERSION,
             'head_error_m':fit['head_error_m'],'wrist_errors_m':fit['wrist_errors_m'],
             'foot_contact_errors_m':fit['foot_contact_errors_m'],'head_angle_error_deg':fit['head_angle_error_deg'],
@@ -147,7 +152,8 @@ def main():
         'joint_tree':list(SMPL_PARENT_IDS),'joint_names':list(SMPL_JOINT_NAMES),
         'vertices_coordinate_frame':'body_world','world_to_smpl':SMPL_FROM_BODY.tolist(),
         'surface_and_joints':'same_smpl_forward_evaluation','custom_skeleton_targets':False,
-        'pose_limits_source':'application_prior_not_official','head_mount':'assumed_forehead_center_as_requested',
+        'pose_limits_source':'application_prior_not_official','head_mount':'camera_mount_offset_optical_y',
+        'camera_forehead_offset_mm':args.camera_forehead_offset_mm,
         'floor':'local_initial_foot_height_prior','head_anchor_vertex':solver.head_vertex,
         'head_anchor_version':HEAD_ANCHOR_VERSION,
         'vertices_file':'smpl_vertices.npy','pose_file':'smpl_pose.npz','mesh_file':'smpl_mesh.json',

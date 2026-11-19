@@ -272,4 +272,6 @@ MANO 模型为 Max Planck 专有许可、禁止再分发；xdSDK 为厂商专有
 
 客户交付界面通过 `userrr/run_client_gui.py` 启动，支持 VS030 录制、离线计算、回放、录制截取，以及 SMPL 人体和 MANO 手部网格显示。录制与计算默认分别保存到 `data/ori` 和 `data/count`。人体姿态为根据头部与手部观测估计的结果，并非全身实测；实机精度仍需验收。
 
+另有 [ACE 联合重建离线实验入口](scripts/ace_joint/README.md)，可从原始 VS030 录制直接运行一次人体与手部联合拟合，生成可独立加载的回放缓存；无需先算旧算法。
+
 SMPL 模型文件不随本仓库分发。请在 [SMPL 官方网站](https://smpl.is.tue.mpg.de/)注册并按照官方流程接受许可、下载模型，将中性模型放到本地 `models/smpl/SMPL_NEUTRAL.pkl`；该目录已被 Git 忽略。模型使用受 [SMPL 官方许可](https://smpl.is.tue.mpg.de/modellicense.html)约束。MANO、SMPL、厂商 SDK 和 ORB-SLAM3 等依赖各自适用其原有许可，商业使用须自行确认授权。

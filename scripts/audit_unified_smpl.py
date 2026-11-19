@@ -12,6 +12,7 @@ ROOT=Path(__file__).resolve().parents[1]
 sys.path[:0]=[str(ROOT/'src'),str(ROOT/'scripts')]
 from smpl_body_mesh import SmplBody
 from egohand.body.smpl_mapping import SMPL_FROM_BODY as C,SMPL_PARENT_IDS
+from egohand.body.smpl_mount import camera_forehead_offset_m, forehead_target
 from egohand.storage.replay import load_recorded_results
 from egohand.vio.hand_pose_binding import consumer_result_display_pose
 
@@ -20,6 +21,7 @@ def main():
     parser=argparse.ArgumentParser();parser.add_argument('directory',type=Path)
     args=parser.parse_args();root=args.directory.resolve()
     manifest=json.loads((root/'unified_smpl_manifest.json').read_text(encoding='utf8'))
+    offset_m=camera_forehead_offset_m(manifest.get('camera_forehead_offset_mm',0.))
     params=np.load(root/manifest.get('pose_file','smpl_pose.npz'));verts=np.load(root/manifest.get('vertices_file','smpl_vertices.npy'),mmap_mode='r')
     rows=[json.loads(l) for l in (root/'derived_pose.jsonl').open(encoding='utf8')]
     results,truncated=load_recorded_results(root);assert not truncated
@@ -38,7 +40,7 @@ def main():
         metrics['vertices_rebuild_m'].append(float(np.max(np.linalg.norm(v-verts[i],axis=1))))
         metrics['joints_rebuild_m'].append(float(np.max(np.linalg.norm(j-params['joints_world'][i],axis=1))))
         row=rows[i];body=row['body'];diag=body['diagnostics'];T=consumer_result_display_pose(results[i])
-        metrics['head_anchor_m'].append(float(np.linalg.norm(v[manifest['head_anchor_vertex']]-T[:3,3])))
+        metrics['head_anchor_m'].append(float(np.linalg.norm(v[manifest['head_anchor_vertex']]-forehead_target(T,offset_m))))
         metrics['head_angle_deg'].append(diag['head_angle_error_deg'])
         metrics['foot_abs_m'].extend(map(abs,diag['foot_contact_errors_m']))
         metrics['wrist_m'].extend(diag['wrist_errors_m'].values())

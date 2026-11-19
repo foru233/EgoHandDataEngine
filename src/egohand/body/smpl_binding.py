@@ -28,6 +28,14 @@ def rejection_reasons(fit):
     if max(map(abs,fit['foot_contact_errors_m']))>.012:reasons.append('floor_residual')
     if max(fit['wrist_errors_m'].values(),default=0.)>.10:reasons.append('wrist_residual')
     if fit['head_local_angle_deg']>85.:reasons.append('head_neck_twist')
+    joints=np.asarray(fit.get('joints'),float)
+    if joints.shape==(24,3):
+        for hip,knee,ankle,name in ((1,4,7,'left'),(2,5,8,'right')):
+            u=joints[hip]-joints[knee];v=joints[ankle]-joints[knee]
+            c=float(np.dot(u,v)/(max(np.linalg.norm(u)*np.linalg.norm(v),1e-8)))
+            angle=float(np.degrees(np.arccos(np.clip(c,-1.,1.))))
+            if not 25.<=angle<=175.:reasons.append(f'{name}_knee_angle')
+        if np.linalg.norm(joints[15]-joints[0])<.32:reasons.append('collapsed_torso')
     return reasons
 
 

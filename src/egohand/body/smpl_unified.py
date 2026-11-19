@@ -209,6 +209,20 @@ class UnifiedSmpl:
                 axis=self.rest[joint+2]-self.rest[joint]
                 axis=axis/torch.linalg.vector_norm(axis)
                 loss+=.08*(R[joint]@axis-direction).square().sum()
+            # Anatomical leg constraints are expressed on the resulting
+            # joints, not on individual axis-angle components. This prevents
+            # a valid optimizer solution from becoming a backward knee or a
+            # folded leg when the head height and hand targets conflict.
+            for hip,knee_joint,ankle in ((1,4,7),(2,5,8)):
+                upper=joints[hip]-joints[knee_joint]
+                lower=joints[ankle]-joints[knee_joint]
+                cosine=(upper*lower).sum()/(torch.linalg.vector_norm(upper).clamp_min(.05)*
+                    torch.linalg.vector_norm(lower).clamp_min(.05))
+                # 25°..175° knee interior angle; penalize both hyperextension
+                # and folding beyond the stable seated range.
+                loss+=1.8*(torch.relu(cosine-.9063)**2+torch.relu(-.9962-cosine)**2)
+            torso=joints[15]-joints[0]
+            loss+=.35*torch.relu(.32-torch.linalg.vector_norm(torso))**2
             # Missing limbs are priors, never copied observations from a
             # separately dimensioned handcrafted skeleton.
             loss+=.025*(pose-neutral).square().sum()

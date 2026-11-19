@@ -2,6 +2,19 @@
 import numpy as np
 
 HEAD_ANCHOR_VERSION='forehead_surface_v2'
+DEFAULT_CAMERA_FOREHEAD_OFFSET_MM=7.5
+
+
+def camera_forehead_offset_m(millimetres):
+    value=float(millimetres)
+    if not 0. <= value <= 100.:
+        raise ValueError('相机至额头垂直距离必须在 0–100 mm 之间')
+    return value / 1000.
+
+
+def forehead_target(camera_pose, offset_m):
+    """Move from the camera centre along its optical +Y (mount down)."""
+    return camera_pose[..., :3, 3] + camera_pose[..., :3, 1] * offset_m
 
 
 def forehead_vertex(vertices,head_weights):

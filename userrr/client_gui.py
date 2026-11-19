@@ -6,12 +6,13 @@ import time
 import json
 import subprocess
 from collections import OrderedDict,deque
+from math import ceil
 import numpy as np
 import yaml
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QLinearGradient, QPainter, QVector3D
+from PySide6.QtGui import QColor, QLinearGradient, QPainter, QVector3D, QDoubleValidator
 from PySide6.QtWidgets import (QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,
-    QComboBox,QFileDialog,QSlider,QSizePolicy,QBoxLayout,QToolButton,QDoubleSpinBox,QFrame,QGridLayout,QMenu,QWidgetAction)
+    QComboBox,QFileDialog,QSlider,QSizePolicy,QBoxLayout,QToolButton,QDoubleSpinBox,QFrame,QScrollArea,QMenu,QWidgetAction)
 from egohand.core.pipeline import ROOT
 from egohand.gui.shared.session import SessionController
 from egohand.gui.shared.sources import SourceRequest,create_source
@@ -25,7 +26,7 @@ from egohand.vio.hand_pose_binding import consumer_result_display_pose
 from egohand.body.body_pose_estimator import BodyPoseEstimator
 from egohand.body.body_model import BodyPose
 from egohand.body.smpl_runtime import GroundReference,request_from_result,pose_from_reply
-from egohand.body.smpl_mount import HEAD_ANCHOR_VERSION
+from egohand.body.smpl_mount import HEAD_ANCHOR_VERSION, DEFAULT_CAMERA_FOREHEAD_OFFSET_MM
 from egohand.gui.smpl_controller import SmplController
 from egohand.storage.replay import load_recorded_results,SavedResultReplay
 from egohand.visualization.display_smoothing import DisplaySmoother
@@ -158,6 +159,7 @@ class ClientMainWindow(QMainWindow):
         self._computed_output=None;self._computed_options=None;self._cache_jobs=[]
         self._recording_mesh_pending=None
         self.saved_timer=QTimer(self);self.saved_timer.setSingleShot(True);self.saved_timer.timeout.connect(self._advance_saved)
+        self.saved_timer.setTimerType(Qt.PreciseTimer)
         self.smoother=DisplaySmoother(yaml.safe_load((ROOT/'configs/app.yaml').read_text(encoding='utf8')).get('display_smoothing'))
         self.image_aspect=4/3
         self.depth_cache=DepthCache()
@@ -179,7 +181,7 @@ class ClientMainWindow(QMainWindow):
         for widget in (self.source,self.open_button,self.output_button,self.start_button,self.compute_button,
                        self.results_button,self.pause_button,self.stop_button,self.record_button,self.capture_button,
                        self.record_output_button,self.trim_button,self.view_menu_button,self.hand_filter_toggle,
-                       self.body_gate_toggle,self.ground_adjust):
+                       self.body_gate_toggle,self.ground_adjust,self.camera_forehead_offset):
             widget.setFixedHeight(32)
         bar_height=max(self.record_controls.sizeHint().height(),self.compute_controls.sizeHint().height())
         self.record_controls.setFixedHeight(bar_height);self.compute_controls.setFixedHeight(bar_height)
@@ -199,7 +201,7 @@ class ClientMainWindow(QMainWindow):
     def _build(self):
         root=QWidget();root.setObjectName('applicationRoot');self.setCentralWidget(root)
         layout=QVBoxLayout(root);layout.setContentsMargins(8,5,8,5);layout.setSpacing(4)
-        head=QHBoxLayout();head.setSpacing(8)
+        head=QHBoxLayout();head.setSpacing(8);self.header_layout=head
         title=QLabel('EgoHand');title.setObjectName('compactTitle');head.addWidget(title)
         edition=QLabel('v4 · R1');edition.setObjectName('compactMeta');head.addWidget(edition)
         head.addStretch()
@@ -209,10 +211,16 @@ class ClientMainWindow(QMainWindow):
         head.addWidget(self.motion_toggle)
         layout.addLayout(head)
         self.motion_rail=MotionRail();layout.addWidget(self.motion_rail)
-        toolbar=QGridLayout();toolbar.setContentsMargins(0,0,0,0);toolbar.setSpacing(0);toolbar.setColumnStretch(2,1);self.command_layout=toolbar
+        self.toolbar_scroll=QScrollArea()
+        self.toolbar_scroll.setAccessibleName('操作栏')
+        self.toolbar_scroll.setFrameShape(QFrame.NoFrame)
+        self.toolbar_scroll.setWidgetResizable(True)
+        self.toolbar_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.toolbar_scroll.setSizePolicy(QSizePolicy.Expanding,QSizePolicy.Fixed)
+        self.command_strip=QWidget()
+        toolbar=QHBoxLayout(self.command_strip);toolbar.setContentsMargins(0,0,0,0);toolbar.setSpacing(0)
         self.compute_controls,selection=self._control_group('计算')
         self.compute_controls.setProperty('section','compute')
-        actions=selection
         self.record_controls,files=self._control_group('录制')
         self.record_controls.setProperty('section','record')
         self.source=QComboBox();self.source.setAccessibleName('数据源');self.source.addItem('实时 · VS030','vendor');self.source.addItem('录制回放','recorded')
@@ -248,7 +256,8 @@ class ClientMainWindow(QMainWindow):
         self.record_output_button=self._button('录制位置',self.choose_record_output);files.addWidget(self.record_output_button)
         self.trim_button=self._button('截取录制',self.trim_recording);files.addWidget(self.trim_button)
         self.record_output_button.setToolTip('录制位置：'+str(self.record_output_parent))
-        layout.addLayout(toolbar)
+        self.toolbar_scroll.setWidget(self.command_strip)
+        layout.addWidget(self.toolbar_scroll)
         self.source_label=CompactLabel('实时 · VS030');self.source_label.setObjectName('compactMeta');head.insertWidget(2,self.source_label,1)
         self.output_label=QLabel('结果位置：默认 '+str(self.replay_output_dir or DEFAULT_RESULT_ROOT))
         self.output_label.setObjectName('compactMeta');self.output_label.setWordWrap(True);self.output_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -269,14 +278,25 @@ class ClientMainWindow(QMainWindow):
         # presentation. Keep them in different functional zones.
         selection.addWidget(self.hand_filter_toggle);selection.addWidget(self.body_gate_toggle)
         selection.addWidget(self.ground_controls)
+        self.camera_mount_controls,mount_layout=self._control_group('相机至额头')
+        self.camera_forehead_offset=QDoubleSpinBox()
+        self.camera_forehead_offset.setAccessibleName('相机到额头垂直距离')
+        self.camera_forehead_offset.setRange(0.,100.);self.camera_forehead_offset.setDecimals(1)
+        self.camera_forehead_offset.setSingleStep(.5);self.camera_forehead_offset.setSuffix(' mm')
+        self.camera_forehead_offset.setValue(DEFAULT_CAMERA_FOREHEAD_OFFSET_MM)
+        self.camera_forehead_offset.setFixedWidth(92);self.camera_forehead_offset.setKeyboardTracking(False)
+        self.camera_forehead_offset.setToolTip('相机光心在额头上方的安装距离。只影响下一次离线计算，已有结果不变。')
+        mount_layout.addWidget(self.camera_forehead_offset)
+        selection.insertWidget(selection.indexOf(self.results_button)+1,self.camera_mount_controls)
         self.view_menu=QMenu(self);self.view_action=QWidgetAction(self.view_menu)
         self.view_action.setDefaultWidget(self.view_controls);self.view_menu.addAction(self.view_action)
         self.view_menu_button=QToolButton();self.view_menu_button.setText('显示')
         self.view_menu_button.setObjectName('displayMenu')
         self.view_menu_button.setAccessibleName('显示设置');self.view_menu_button.setMenu(self.view_menu)
         self.view_menu_button.setPopupMode(QToolButton.InstantPopup);files.addWidget(self.view_menu_button)
-        self.command_groups=(self.record_controls,self.compute_controls)
-        self._toolbar_wide=None
+        self.command_groups=(self.compute_controls,self.record_controls)
+        for group in self.command_groups:toolbar.addWidget(group,0,Qt.AlignVCenter)
+        toolbar.addStretch()
         self._layout_toolbar()
         self.middle_column=self._middle_column()
         self.right_column=self._right_column()
@@ -288,9 +308,16 @@ class ClientMainWindow(QMainWindow):
 
         self.saved_controls=QWidget();saved_bar=QHBoxLayout(self.saved_controls);saved_bar.setContentsMargins(0,0,0,0)
         self.saved_play=self._button('播放',self.toggle_saved_playback);saved_bar.addWidget(self.saved_play)
-        self.saved_speed=QComboBox();self.saved_speed.setAccessibleName('结果回放倍速')
-        for speed in (.25,.5,1.,1.5,2.,4.):self.saved_speed.addItem(f'{speed:g}×',speed)
-        self.saved_speed.setCurrentIndex(self.saved_speed.findData(1.));saved_bar.addWidget(self.saved_speed)
+        self.saved_speed=QComboBox();self.saved_speed.setAccessibleName('结果回放倍速');self.saved_speed.setEditable(True)
+        self.saved_speed.setInsertPolicy(QComboBox.NoInsert);self.saved_speed.setFixedWidth(82)
+        self.saved_speed.setToolTip('可输入 0.05–32 倍；所有档位逐帧播放。「最快」以本机可显示的速度播放。')
+        for speed in (.25,.5,1.,1.5,2.,4.,8.,16.,32.):self.saved_speed.addItem(f'{speed:g}×',speed)
+        self.saved_speed.addItem('最快')
+        self.saved_speed.setCurrentIndex(self.saved_speed.findData(1.))
+        validator=QDoubleValidator(.05,32.,2,self);validator.setNotation(QDoubleValidator.StandardNotation)
+        self.saved_speed.lineEdit().setValidator(validator);self.saved_speed.lineEdit().editingFinished.connect(self._normalize_saved_speed)
+        self.saved_speed.activated.connect(self._saved_speed_changed)
+        saved_bar.addWidget(self.saved_speed)
         self.result_slider=QSlider(Qt.Horizontal);self.result_slider.setAccessibleName('已有结果帧')
         # Decoder seeks can require replaying HEVC from the start. Do not
         # launch a seek for each mouse movement during a drag.
@@ -511,7 +538,7 @@ class ClientMainWindow(QMainWindow):
     def sync_controls(self):
         running=bool(self.session.worker and self.session.worker.isRunning())
         for w in (self.source,self.mode,self.open_button,self.results_button,self.output_button,self.start_button,self.compute_button,self.record_output_button,self.trim_button):w.setEnabled(not running)
-        for w in (self.hand_filter_toggle,self.body_gate_toggle,self.ground_adjust,self.ground_slider):w.setEnabled(not running)
+        for w in (self.hand_filter_toggle,self.body_gate_toggle,self.ground_adjust,self.ground_slider,self.camera_forehead_offset):w.setEnabled(not running)
         if self.recovery_profile:
             self.source.setEnabled(False);self.mode.setEnabled(False)
         elif self.live_recovery_profile:
@@ -605,6 +632,7 @@ class ClientMainWindow(QMainWindow):
             if kind=='recorded' and not self.recording_source:raise ValueError('请先导入录制目录')
             compute_options={'strict_body':self.body_gate_toggle.isChecked(),
                 'initial_camera_height_m':float(self.ground_adjust.value())/100.,
+                'camera_forehead_offset_mm':self.camera_forehead_offset.value(),
                 'hand_filter':self.hand_filter_toggle.isChecked()}
             output=(Path(self.replay_output_dir) if self.replay_output_dir and self.result_output_parent is None else
                     (self.result_output_parent or DEFAULT_RESULT_ROOT)/
@@ -913,7 +941,8 @@ class ClientMainWindow(QMainWindow):
             cfg=yaml.safe_load((ROOT/'configs/mano.yaml').read_text(encoding='utf8'))
             options=options or {'strict_body':self.body_gate_toggle.isChecked(),'initial_camera_height_m':self.ground_reference.height_m}
             command=[str(cfg['python']),str(ROOT/'scripts/build_unified_smpl_replay.py'),str(output),str(output),
-                '--in-place','--mano','--initial-camera-height-m',str(options['initial_camera_height_m'])]
+                '--in-place','--mano','--initial-camera-height-m',str(options['initial_camera_height_m']),
+                '--camera-forehead-offset-mm',str(options.get('camera_forehead_offset_mm',self.camera_forehead_offset.value()))]
             if options.get('strict_body'):command.append('--strict-body')
             proc=subprocess.Popen(command,
                 cwd=str(ROOT),env=env,stdout=log,stderr=subprocess.STDOUT,
@@ -1267,8 +1296,25 @@ class ClientMainWindow(QMainWindow):
             self._saved_body_advance=(index,time.perf_counter()-processing_ms/1000.)
             return
         delta=self.saved[index+1].timestamp_ns-self.saved[index].timestamp_ns
-        delay=(delta/1e6 if 0<delta<=2_000_000_000 else 33.333)/float(self.saved_speed.currentData())
-        self.saved_timer.start(max(1,int(delay-processing_ms)))
+        speed=self._saved_speed_value()
+        delay=0. if speed is None else (delta/1e6 if 0<delta<=2_000_000_000 else 33.333)/speed
+        self.saved_timer.start(max(1,ceil(delay-processing_ms)))
+
+    def _saved_speed_value(self):
+        text=self.saved_speed.currentText().strip()
+        if text=='最快':return None
+        try:value=float(text.replace('×','').strip())
+        except (TypeError,ValueError):value=1.
+        return min(32.,max(.05,value))
+
+    def _normalize_saved_speed(self):
+        value=self._saved_speed_value();self.saved_speed.setEditText('最快' if value is None else f'{value:g}×')
+        self._saved_speed_changed()
+
+    def _saved_speed_changed(self,*_):
+        if not self.saved_timer.isActive():return
+        self.saved_timer.stop()
+        self._schedule_saved()
 
     def _advance_saved(self):
         if self.result_slider.value()<len(self.saved)-1:
@@ -1398,12 +1444,13 @@ class ClientMainWindow(QMainWindow):
         if hasattr(self,'column_layout'):self._fit_columns()
 
     def _layout_toolbar(self):
-        wide=self.width() >= sum(group.sizeHint().width() for group in self.command_groups)+32
-        if self._toolbar_wide==wide:return
-        self._toolbar_wide=wide
-        for group in self.command_groups:self.command_layout.removeWidget(group)
-        for index,group in enumerate(self.command_groups):
-            self.command_layout.addWidget(group,0 if wide else index,index if wide else 0,Qt.AlignLeft)
+        margins=self.centralWidget().layout().contentsMargins()
+        available=self.centralWidget().width()-margins.left()-margins.right()
+        self._toolbar_wide=self.command_strip.minimumSizeHint().width()<=available
+        scrollbar=self.toolbar_scroll.horizontalScrollBar()
+        height=self.command_strip.sizeHint().height()
+        if not self._toolbar_wide:height+=scrollbar.sizeHint().height()
+        self.toolbar_scroll.setFixedHeight(height)
 
     def closeEvent(self,event):
         self._closing=True

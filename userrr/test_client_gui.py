@@ -13,20 +13,29 @@ def test_compact_toolbar_and_tiles_keep_controls_readable(qtbot):
     try:
         w.resize(900,620);w.show();qtbot.wait(150)
         assert not w._toolbar_wide
+        viewport=w.toolbar_scroll.viewport()
+        scrollbar=w.toolbar_scroll.horizontalScrollBar()
+        assert scrollbar.maximum()>0
+        mount=w.camera_mount_controls
+        assert mount.mapTo(viewport,QPoint(mount.width(),0)).x()<=viewport.width()
         for group in w.command_groups:
-            assert group.mapTo(w,QPoint(0,0)).x()+group.width() <= w.width()
+            assert group.y()==w.compute_controls.y()
             for button in group.findChildren(QPushButton)+group.findChildren(QToolButton):
                 if button.isVisible() and button.text():
                     assert button.width() >= button.sizeHint().width()-2, button.text()
+        scrollbar.setValue(scrollbar.maximum())
+        assert w.stop_button.mapTo(viewport,QPoint(w.stop_button.width(),0)).x()<=viewport.width()
+        scrollbar.setValue(0)
         assert w.raw_left_tile.geometry().bottom()+1 == w.raw_right_tile.geometry().top()
         assert w.raw_right_tile.geometry().bottom()+1 == w.depth_tile.geometry().top()
         assert w.left_tile.geometry().bottom()+1 == w.right_tile.geometry().top()
         assert w.record_output_parent.name=='ori'
         assert w.result_output_parent is None
-        w.resize(1600,900);qtbot.wait(100)
+        w.resize(1920,900);qtbot.wait(100)
         assert w._toolbar_wide
+        assert scrollbar.maximum()==0
         record=w.record_controls.geometry();compute=w.compute_controls.geometry()
-        assert compute.left()-record.right()-1 == 0
+        assert record.left()-compute.right()-1 == 0
         assert record.height()==compute.height()
         assert record.top()==compute.top()
         assert {widget.height() for widget in (w.start_button,w.compute_button,w.view_menu_button,
@@ -137,17 +146,44 @@ def test_saved_playback_waits_for_depth_and_pause_cancels_advance(qtbot,monkeypa
 
 def test_saved_playback_speed_and_seek(qtbot, monkeypatch):
     from types import SimpleNamespace
+    import client_gui
+    import numpy as np
+    now=[0.]
+    monkeypatch.setattr(client_gui,'time',SimpleNamespace(perf_counter=lambda:now[0]))
     w=ClientMainWindow();qtbot.addWidget(w)
     try:
-        w.saved=[SimpleNamespace(timestamp_ns=i*100_000_000,diagnostics={}) for i in range(4)]
+        w.saved=[SimpleNamespace(timestamp_ns=i*100_000_000,diagnostics={}) for i in range(12)]
         w.result_slider.valueChanged.disconnect(w.display_saved)
-        w.result_slider.setRange(0,3)
-        w.saved_speed.setCurrentIndex(w.saved_speed.findData(2.))
+        monkeypatch.setattr(w,'display_saved',lambda index:None)
+        w.result_slider.setRange(0,11)
         w.toggle_saved_playback()
+        w.saved_timer.stop();w._saved_depth_advance=(0,now[0])
+        speed_index=w.saved_speed.findData(2.)
+        w.saved_speed.setCurrentIndex(speed_index);w.saved_speed.activated.emit(speed_index)
+        assert w._saved_depth_advance is not None and not w.saved_timer.isActive()
+        w.on_depth(w.generation,np.zeros((8,8,3),np.uint8),'深度')
         assert w.saved_timer.isActive() and w.saved_timer.interval()==50
-        w.saved_timer.stop();w.result_slider.setValue(2);w._advance_saved()
-        assert w.result_slider.value()==3 and not w.saved_timer.isActive()
+        now[0]=.18
+        w.saved_timer.stop();w._advance_saved()
+        assert w.result_slider.value()==1 and w.saved_timer.isActive()
+        w._saved_seek_started();w.result_slider.setValue(6);w._saved_seek_finished()
+        assert w.result_slider.value()==6 and w.saved_timer.isActive()
+        fastest=w.saved_speed.findText('最快')
+        w.saved_speed.setCurrentIndex(fastest);w.saved_speed.activated.emit(fastest)
+        w._normalize_saved_speed()
+        assert w.saved_speed.currentText()=='最快' and w.saved_timer.interval()==1
+        displayed=[]
+        w.result_slider.valueChanged.connect(displayed.append)
+        for _ in range(5):
+            now[0]+=1.
+            w.saved_timer.stop();w._advance_saved()
+        assert displayed==[7,8,9,10,11]
+        assert w.result_slider.value()==11 and not w.saved_timer.isActive()
         assert w.saved_play.text()=='播放'
+        w.saved_speed.setEditText('12.5')
+        assert abs(w._saved_speed_value()-12.5)<1e-6
+        w.saved_speed.setEditText('999')
+        assert w._saved_speed_value()==32.
     finally:w.close()
 
 
@@ -285,6 +321,8 @@ def test_completed_recording_starts_background_cache(qtbot, monkeypatch, tmp_pat
         (tmp_path/'reprocessing.json').write_text(json.dumps({'status':'completed','result_count':3}),encoding='utf8')
         jobs=[]
         monkeypatch.setattr(client_gui.subprocess,'Popen',lambda args,**kwargs: jobs.append((args,kwargs)) or SimpleNamespace(poll=lambda:None))
+        assert w.camera_forehead_offset.value()==7.5
+        w._computed_options={'strict_body':False,'initial_camera_height_m':1.65,'camera_forehead_offset_mm':12.5}
         w._computed_output=tmp_path
         w.on_finished()
         assert len(jobs)==2 and all(str(tmp_path) in job[0] for job in jobs)
@@ -292,6 +330,7 @@ def test_completed_recording_starts_background_cache(qtbot, monkeypatch, tmp_pat
         pose_job=next(job for job in jobs if 'build_unified_smpl_replay.py' in job[0][1])
         assert '--in-place' in pose_job[0] and '--mano' in pose_job[0]
         assert '--initial-camera-height-m' in pose_job[0]
+        assert pose_job[0][pose_job[0].index('--camera-forehead-offset-mm')+1]=='12.5'
         assert w._cache_jobs and '缓存' in w.output_label.text()
     finally:w.close()
 
