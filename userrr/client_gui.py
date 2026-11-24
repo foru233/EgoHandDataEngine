@@ -12,7 +12,7 @@ import yaml
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QLinearGradient, QPainter, QVector3D, QDoubleValidator
 from PySide6.QtWidgets import (QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,
-    QComboBox,QFileDialog,QSlider,QSizePolicy,QBoxLayout,QToolButton,QDoubleSpinBox,QFrame,QScrollArea,QMenu,QWidgetAction)
+    QComboBox,QFileDialog,QSlider,QSizePolicy,QBoxLayout,QToolButton,QDoubleSpinBox,QFrame,QMenu,QWidgetAction)
 from egohand.core.pipeline import ROOT
 from egohand.gui.shared.session import SessionController
 from egohand.gui.shared.sources import SourceRequest,create_source
@@ -183,9 +183,9 @@ class ClientMainWindow(QMainWindow):
                        self.record_output_button,self.trim_button,self.view_menu_button,self.hand_filter_toggle,
                        self.body_gate_toggle,self.ground_adjust,self.camera_forehead_offset):
             widget.setFixedHeight(32)
-        bar_height=max(self.record_controls.sizeHint().height(),self.compute_controls.sizeHint().height())
-        self.record_controls.setFixedHeight(bar_height);self.compute_controls.setFixedHeight(bar_height)
-        self._toolbar_wide=None;self._layout_toolbar()
+        bar_height=max(group.sizeHint().height() for group in self.command_groups)
+        for group in self.command_groups:group.setFixedHeight(bar_height)
+        self._layout_toolbar()
         for view in (self.left_view,self.right_view,self.depth_view,self.raw_left_view,self.raw_right_view):
             view.set_theme(THEMES['dark'])
         self.vio_panel.set_theme(THEMES['dark'])
@@ -211,16 +211,16 @@ class ClientMainWindow(QMainWindow):
         head.addWidget(self.motion_toggle)
         layout.addLayout(head)
         self.motion_rail=MotionRail();layout.addWidget(self.motion_rail)
-        self.toolbar_scroll=QScrollArea()
-        self.toolbar_scroll.setAccessibleName('操作栏')
-        self.toolbar_scroll.setFrameShape(QFrame.NoFrame)
-        self.toolbar_scroll.setWidgetResizable(True)
-        self.toolbar_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.toolbar_scroll.setSizePolicy(QSizePolicy.Expanding,QSizePolicy.Fixed)
         self.command_strip=QWidget()
-        toolbar=QHBoxLayout(self.command_strip);toolbar.setContentsMargins(0,0,0,0);toolbar.setSpacing(0)
+        self.command_strip.setAccessibleName('操作栏')
+        self.command_strip.setSizePolicy(QSizePolicy.Expanding,QSizePolicy.Fixed)
+        self.command_layout=QVBoxLayout(self.command_strip)
+        self.command_layout.setContentsMargins(0,0,0,0);self.command_layout.setSpacing(4)
+        self._command_rows=()
         self.compute_controls,selection=self._control_group('计算')
         self.compute_controls.setProperty('section','compute')
+        self.fit_controls,fit_options=self._control_group('拟合设置')
+        self.fit_controls.setProperty('section','compute')
         self.record_controls,files=self._control_group('录制')
         self.record_controls.setProperty('section','record')
         self.source=QComboBox();self.source.setAccessibleName('数据源');self.source.addItem('实时 · VS030','vendor');self.source.addItem('录制回放','recorded')
@@ -256,8 +256,7 @@ class ClientMainWindow(QMainWindow):
         self.record_output_button=self._button('录制位置',self.choose_record_output);files.addWidget(self.record_output_button)
         self.trim_button=self._button('截取录制',self.trim_recording);files.addWidget(self.trim_button)
         self.record_output_button.setToolTip('录制位置：'+str(self.record_output_parent))
-        self.toolbar_scroll.setWidget(self.command_strip)
-        layout.addWidget(self.toolbar_scroll)
+        layout.addWidget(self.command_strip)
         self.source_label=CompactLabel('实时 · VS030');self.source_label.setObjectName('compactMeta');head.insertWidget(2,self.source_label,1)
         self.output_label=QLabel('结果位置：默认 '+str(self.replay_output_dir or DEFAULT_RESULT_ROOT))
         self.output_label.setObjectName('compactMeta');self.output_label.setWordWrap(True);self.output_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -276,8 +275,6 @@ class ClientMainWindow(QMainWindow):
         self.world_column=self._world_panel()
         # Processing options change results; visibility controls only change
         # presentation. Keep them in different functional zones.
-        selection.addWidget(self.hand_filter_toggle);selection.addWidget(self.body_gate_toggle)
-        selection.addWidget(self.ground_controls)
         self.camera_mount_controls,mount_layout=self._control_group('相机至额头')
         self.camera_forehead_offset=QDoubleSpinBox()
         self.camera_forehead_offset.setAccessibleName('相机到额头垂直距离')
@@ -287,16 +284,15 @@ class ClientMainWindow(QMainWindow):
         self.camera_forehead_offset.setFixedWidth(92);self.camera_forehead_offset.setKeyboardTracking(False)
         self.camera_forehead_offset.setToolTip('相机光心在额头上方的安装距离。只影响下一次离线计算，已有结果不变。')
         mount_layout.addWidget(self.camera_forehead_offset)
-        selection.insertWidget(selection.indexOf(self.results_button)+1,self.camera_mount_controls)
+        for control in (self.camera_mount_controls,self.hand_filter_toggle,self.body_gate_toggle,self.ground_controls):
+            fit_options.addWidget(control)
         self.view_menu=QMenu(self);self.view_action=QWidgetAction(self.view_menu)
         self.view_action.setDefaultWidget(self.view_controls);self.view_menu.addAction(self.view_action)
         self.view_menu_button=QToolButton();self.view_menu_button.setText('显示')
         self.view_menu_button.setObjectName('displayMenu')
         self.view_menu_button.setAccessibleName('显示设置');self.view_menu_button.setMenu(self.view_menu)
         self.view_menu_button.setPopupMode(QToolButton.InstantPopup);files.addWidget(self.view_menu_button)
-        self.command_groups=(self.compute_controls,self.record_controls)
-        for group in self.command_groups:toolbar.addWidget(group,0,Qt.AlignVCenter)
-        toolbar.addStretch()
+        self.command_groups=(self.compute_controls,self.fit_controls,self.record_controls)
         self._layout_toolbar()
         self.middle_column=self._middle_column()
         self.right_column=self._right_column()
@@ -1446,11 +1442,29 @@ class ClientMainWindow(QMainWindow):
     def _layout_toolbar(self):
         margins=self.centralWidget().layout().contentsMargins()
         available=self.centralWidget().width()-margins.left()-margins.right()
-        self._toolbar_wide=self.command_strip.minimumSizeHint().width()<=available
-        scrollbar=self.toolbar_scroll.horizontalScrollBar()
-        height=self.command_strip.sizeHint().height()
-        if not self._toolbar_wide:height+=scrollbar.sizeHint().height()
-        self.toolbar_scroll.setFixedHeight(height)
+        spacing=self.command_layout.spacing()
+        rows=[[]]
+        used=0
+        for group in self.command_groups:
+            width=group.sizeHint().width()
+            if rows[-1] and used+spacing+width>available:
+                rows.append([]);used=0
+            used+=width+(spacing if rows[-1] else 0)
+            rows[-1].append(group)
+        rows=tuple(tuple(row) for row in rows)
+        if rows==self._command_rows:return
+        self._command_rows=rows
+        self._toolbar_wide=len(rows)==1
+        while self.command_layout.count():
+            previous=self.command_layout.takeAt(0).layout()
+            while previous.count():previous.takeAt(0)
+            previous.deleteLater()
+        for controls in rows:
+            row=QHBoxLayout();row.setContentsMargins(0,0,0,0);row.setSpacing(spacing)
+            for group in controls:row.addWidget(group,0,Qt.AlignVCenter)
+            row.addStretch()
+            self.command_layout.addLayout(row)
+        if hasattr(self,'right_column'):QTimer.singleShot(0,self._fit_columns)
 
     def closeEvent(self,event):
         self._closing=True

@@ -73,6 +73,12 @@ def acceleration(x,t):
     v=(x[1:]-x[:-1])/dt.reshape(-1,*([1]*(x.ndim-1)))
     return (v[1:]-v[:-1])/((dt[1:]+dt[:-1])*.5).reshape(-1,*([1]*(x.ndim-1)))
 
+def motion_penalty(points, times, scale, valid):
+    """Huber loss on world-space curvature, using actual frame intervals."""
+    deviation=acceleration(points,times).norm(dim=-1)/scale
+    per_frame=robust(deviation.reshape(len(valid),-1)).mean(-1)
+    return (per_frame*valid).sum()/valid.sum().clamp_min(1)
+
 def minimal_swing(source,target):
     source=source/np.linalg.norm(source);target=target/np.linalg.norm(target)
     axis=np.cross(source,target);sine=np.linalg.norm(axis);cosine=np.dot(source,target)
@@ -119,7 +125,25 @@ def aim_arms(body,initial,transforms,targets):
             result[row,index]=Rotation.from_matrix(C_NP@local@C_NP).as_rotvec()
     return torch.as_tensor(result,dtype=initial.dtype,device=initial.device)
 
+def context_windows(segment,window,context):
+    first=0
+    while first<len(segment):
+        start=max(0,first-context)
+        stop=min(len(segment),start+window)
+        yield segment[start:stop],first-start
+        first=stop
+
+def hand_continuity_edges(valid, identities, timestamps):
+    previous,current=np.flatnonzero(valid)[:-1],np.flatnonzero(valid)[1:]
+    delta=timestamps[current]-timestamps[previous]
+    same=(identities[previous]>=0)&(identities[previous]==identities[current])
+    connected=same&(delta>0)&(delta<=120_000_000)
+    return previous[connected],current[connected],delta[connected].astype(np.float32)/1e9
+
 def solve(a):
+    if a.window<1 or not all(np.isfinite(value) and value>=0 for value in
+            (a.continuity_context,a.continuity_weight,a.stability_weight)):
+        raise ValueError('Invalid continuity configuration')
     if a.output.exists():raise FileExistsError(a.output)
     a.output.mkdir(parents=True)
     device=a.device;seed=archive(a.seed/'smpl_pose.npz');cam=archive(a.camera)
@@ -165,6 +189,9 @@ def solve(a):
     out_b[:]=np.load(a.seed/'smpl_vertices.npy',mmap_mode='r') if fitted.size else 0.
     bj=seed['joints_world'].copy();br=seed['rotations_world'].copy();transl=seed['transl'].copy()
     reports=[];rejected_hands=0;started=time.monotonic()
+    continuity=direct and a.continuity_weight>0
+    stabilize=continuity and a.stability_weight>0
+    context=min(a.continuity_context,a.window//3) if continuity else 0
     valid_cam=np.isfinite(cam['T_world_from_camera']).all((1,2))
     usable=valid_cam&np.isfinite(cam['ground_y_m'])
     usable[:a.start]=False
@@ -173,26 +200,51 @@ def solve(a):
     groups=[];group=[]
     for i in range(n):
         contiguous=bool(group) and i==group[-1]+1 and cam['reference'][i]==cam['reference'][group[-1]] and 0<int(cam['timestamp_ns'][i]-cam['timestamp_ns'][group[-1]])<200_000_000
-        if group and (not usable[i] or not contiguous or len(group)>=a.window):groups.append(group);group=[]
+        if group and (not usable[i] or not contiguous):groups.append(group);group=[]
         if usable[i]:group.append(i)
     if group:groups.append(group)
-    for gno,ix in enumerate(groups):
+    windows=[item for segment in groups for item in context_windows(segment,a.window,context)]
+    for gno,(ix,prefix) in enumerate(windows):
         b=len(ix);T=tensor(cam['T_world_from_camera'][ix]);initial=tensor(init_aa[ix])
         if direct:initial=aim_arms(body,initial,T,hands['wrist_camera_m'][ix])
+        fixed_body=torch.arange(b,device=device)<prefix
+        previous_body=tensor(output_aa[ix]) if prefix else initial
         # Unobserved frames still run the new body objective; they remain prior-only.
         active=[h for h in range(2) if hand_valid[ix,h].any()]
         aa=torch.nn.Parameter(initial.clone())
         params=[aa];hp={};hb={};masks={};ref={};prior={};pw={};motion_ref={};wrist_seed={}
+        previous_hands={};hand_edges={}
+        hand_triplets={}
+        frame_ns=cam['timestamp_ns'][ix]
+        delta=np.diff(frame_ns)
+        core_triplets=(np.arange(max(0,b-2))+2>=prefix)&(delta[:-1]<=80_000_000)&(delta[1:]<=80_000_000)
+        body_triplets=tensor(core_triplets)
         for h in active:
             good=hand_valid[ix,h]
             rot=hands['rotations'][ix,h].copy();rot[~good]=np.tile(np.eye(3),(16,1,1))
             hp[h]=torch.nn.Parameter(tensor(Rotation.from_matrix(rot.reshape(-1,3,3)).as_rotvec().reshape(b,48)))
+            if prefix:
+                fixed_hand=fixed_body&torch.as_tensor(good,device=device)
+                previous_rot=out_hrot[ix,h].copy()
+                previous_rot[~good]=np.eye(3)
+                previous_pose=tensor(Rotation.from_matrix(previous_rot.reshape(-1,3,3)).as_rotvec().reshape(b,48))
+                previous_hands[h]=(fixed_hand,previous_pose)
             params.append(hp[h]);beta=hands['betas'][ix,h].copy();beta[~good]=0;hb[h]=tensor(beta)
             mask=obs['valid'][ix,:,h].copy()&good[:,None,None];mask[:,:,1]=False;masks[h]=tensor(mask)
             pr=obs['prior_R'][ix,h].copy();finite=np.isfinite(pr).all((2,3,4));pr[~finite]=np.tile(np.eye(3),(16,1,1))
             prior[h]=tensor(pr);pw[h]=tensor(obs['prior_weight'][ix,h]*finite*good[:,None])
+            if continuity:
+                before,after,seconds=hand_continuity_edges(good,obs['identity_ids'][ix,h],cam['timestamp_ns'][ix])
+                edge_mask=after>=prefix
+                before,after,seconds=before[edge_mask],after[edge_mask],seconds[edge_mask]
+                stereo_confident=obs['stereo_valid'][ix,h].sum(axis=1)>=6
+                edge_weight=np.where(stereo_confident[before]&stereo_confident[after],.45,1.)
+                hand_edges[h]=(before.tolist(),after.tolist(),tensor(seconds),tensor(edge_weight))
+                ids=obs['identity_ids'][ix,h]
+                hand_triplets[h]=tensor(core_triplets&good[:-2]&good[1:-1]&good[2:]&
+                    (ids[1:-1]>=0)&(ids[:-2]==ids[1:-1])&(ids[1:-1]==ids[2:]))
         opt=torch.optim.Adam(params,lr=a.lr)
-        times=tensor((cam['timestamp_ns'][ix]-cam['timestamp_ns'][ix[0]])/1e9)
+        times=tensor((frame_ns-frame_ns[0])/1e9)
         floor=tensor(cam['ground_y_m'][ix]);uv={h:tensor(np.nan_to_num(obs['uv'][ix,:,h])) for h in active}
         with torch.no_grad():
             init_j,_,init_R,_,_=body.forward(initial,T)
@@ -210,8 +262,11 @@ def solve(a):
                     derived=~stereo[:,0] & (stereo.sum(1)>=4)
                     target[derived]=motion_ref[h][derived,0].cpu().numpy()
                     wrist_seed[h]=(tensor(np.nan_to_num(target)),tensor((stereo[:,0]|derived)&hand_valid[ix,h]))
+        def body_parameters():
+            return torch.where(fixed_body[:,None,None],previous_body,aa) if prefix else aa
+
         def evaluate(geometry_warmup=0.):
-            joints,verts,R,local,shift=body.forward(aa,T)
+            joints,verts,R,local,shift=body.forward(body_parameters(),T)
             sole=torch.stack([verts[:,slots,1].amax(1) for slots in body.foot_slots],1)
             loss=a.floor_weight*(sole-floor[:,None]).square().mean()
             loss=loss+a.body_prior*(aa-initial).square().mean()
@@ -222,10 +277,19 @@ def solve(a):
                 cos=(u*v).sum(-1)/(u.norm(dim=-1)*v.norm(dim=-1)).clamp_min(.01)
                 loss=loss+2*(torch.relu(cos-.9063).square()+torch.relu(-.9962-cos).square()).mean()
             loss=loss+.25*(local[:,[7,8,10,11]]-batch_rodrigues(initial[:,[7,8,10,11]].reshape(-1,3)).reshape(b,4,3,3)).square().mean()
+            if continuity and b>1:
+                first_edge=max(0,prefix-1)
+                angles=geodesic(local[first_edge:-1],local[first_edge+1:])
+                seconds=(times[first_edge+1:]-times[first_edge:-1]).clamp_min(.005)
+                loss=loss+a.continuity_weight*robust(angles/(8.*seconds[:,None])).mean()
             handout={};pixelvalues=[]
             for h in active:
                 side=['left','right'][h]
-                o=models[side](global_orient=hp[h][:,:3],hand_pose=hp[h][:,3:],betas=hb[h])
+                hand_pose=hp[h]
+                if prefix:
+                    held,previous_pose=previous_hands[h]
+                    hand_pose=torch.where(held[:,None],previous_pose,hand_pose)
+                o=models[side](global_orient=hand_pose[:,:3],hand_pose=hand_pose[:,3:],betas=hb[h])
                 base=landmarks(o,side)
                 wristcam=torch.einsum('bij,bj->bi',T[:,:3,:3].transpose(-1,-2),joints[:,20+h]-T[:,:3,3])
                 delta=wristcam-base[:,0];hj=base+delta[:,None];hv=o.vertices+delta[:,None]
@@ -235,7 +299,7 @@ def solve(a):
                 p,z=project(hj,K,Tv);mask=masks[h]
                 pixel=(robust((p-uv[h])/5).sum(-1)*mask).sum()/mask.sum().clamp_min(1)
                 loss=loss+pixel;pixelvalues.append(pixel)
-                rotations=batch_rodrigues(hp[h].reshape(-1,3)).reshape(b,16,3,3)
+                rotations=batch_rodrigues(hand_pose.reshape(-1,3)).reshape(b,16,3,3)
                 angle=geodesic(rotations[:,None],prior[h])
                 loss=loss+.15*(angle.square().mean(-1)*pw[h]).sum()/pw[h].sum().clamp_min(1)
                 loss=loss+a.finger_prior*(angle[:,:,1:].square().mean(-1)*pw[h]).sum()/pw[h].sum().clamp_min(1)
@@ -243,7 +307,23 @@ def solve(a):
                 framegood=tensor(hand_valid[ix,h])
                 orientation=geodesic(T[:,:3,:3]@rotations[:,0],R[:,20+h]@ref[h])
                 loss=loss+a.orientation_weight*(orientation.square()*framegood).sum()/framegood.sum().clamp_min(1)
-                if b>=3:
+                if continuity:
+                    before,after,seconds,weight=hand_edges[h]
+                    if before:
+                        world_root=T[:,:3,:3]@rotations[:,0]
+                        root=geodesic(world_root[before],world_root[after])
+                        finger=geodesic(rotations[before,1:],rotations[after,1:])
+                        motion=robust(root/(10.*seconds))+robust(finger/(10.*seconds[:,None])).mean(-1)
+                        loss=loss+a.continuity_weight*(motion*weight).mean()
+                if stabilize and b>=3:
+                    # Camera-frame acceleration can penalize a still hand when the head moves.
+                    # Track wrist position and wrist-relative hand geometry independently.
+                    relative=(hj[:,1:]-hj[:,:1])@T[:,:3,:3].transpose(-1,-2)
+                    valid=hand_triplets[h]
+                    loss=loss+a.stability_weight*a.temporal_weight*(
+                        motion_penalty(joints[:,20+h],times,9.,valid)+
+                        motion_penalty(relative,times,7.,valid))
+                elif b>=3:
                     good=tensor(hand_valid[ix,h][:-2]&hand_valid[ix,h][1:-1]&hand_valid[ix,h][2:])
                     reference=motion_ref[h]
                     # Reference acceleration is the geometrically refined seed,
@@ -252,8 +332,19 @@ def solve(a):
                     loss=loss+a.temporal_weight*(robust(diff).mean((1,2))*good).sum()/good.sum().clamp_min(1)
                 loss=loss+.1*(torch.relu(.03-z).square()*mask).sum()/mask.sum().clamp_min(1)
                 handout[h]=(hj,hv,delta,rotations)
-            if b>=3:
-                loss=loss+a.body_temporal*robust((acceleration(joints,times)-acceleration(init_j,times))/30).mean()
+            if stabilize and b>=3:
+                # The hard forehead anchor follows measured head motion. Penalize
+                # pelvis jitter and poorly observed bends without smoothing that anchor.
+                elbow=joints[:,18:20]-joints[:,16:18]
+                knee=joints[:,4:6]-joints[:,1:3]
+                loss=loss+a.stability_weight*(
+                    a.body_temporal*motion_penalty(joints[:,0],times,7.,body_triplets)+
+                    a.body_temporal*motion_penalty(knee,times,7.,body_triplets)+
+                    2*a.body_temporal*motion_penalty(elbow,times,7.,body_triplets))
+            elif b>=3:
+                reference=0. if continuity else acceleration(init_j,times)
+                relative=joints-joints[:,:1] if continuity else joints
+                loss=loss+a.body_temporal*robust((acceleration(relative,times)-reference)/30).mean()
             return loss,handout,(joints,verts,R,local,shift,sole),torch.stack(pixelvalues).sum() if pixelvalues else loss*0
         with torch.no_grad():initial_loss=float(evaluate()[0])
         best=None;best_loss=float('inf')
@@ -271,14 +362,16 @@ def solve(a):
             if best is not None:
                 for p,value in zip(params,best):p.copy_(value)
             final_loss,ho,bo,pixel=evaluate();joints,_,R,local,shift,sole=bo
-            _,full,_,_,_=body.forward(aa,T,full=True)
+            _,full,_,_,_=body.forward(body_parameters(),T,full=True)
             assert torch.isfinite(full).all()
-            out_b[ix]=full.cpu().numpy();bj[ix]=joints.cpu().numpy();br[ix]=R.cpu().numpy()
+            core=ix[prefix:]
+            out_b[core]=full[prefix:].cpu().numpy();bj[core]=joints[prefix:].cpu().numpy();br[core]=R[prefix:].cpu().numpy()
             actual=Rotation.from_matrix(local.cpu().numpy().reshape(-1,3,3)).as_rotvec().reshape(b,24,3)
-            output_aa[ix]=actual;transl[ix]=shift.cpu().numpy();computed[ix]=True
+            output_aa[core]=actual[prefix:];transl[core]=shift[prefix:].cpu().numpy();computed[core]=True
             maxfloor=float((sole-floor[:,None]).abs().max())
             for h,(hj,hv,delta,rot) in ho.items():
                 good=hand_valid[ix,h].copy()
+                good[:prefix]=False
                 if direct:
                     pixels,depth=project(hj,K,Tv)
                     errors=(pixels-uv[h]).norm(dim=-1).cpu().numpy()
@@ -292,13 +385,14 @@ def solve(a):
                                 or (view_depth[row][mask]<=.01).any()
                                 or np.median(observed_errors)>40.):
                             good[row]=False;rejected_hands+=1
-                    hand_valid[ix,h]=good
+                    hand_valid[core,h]=good[prefix:]
                 gi=np.array(ix)[good]
                 out_v[gi,h]=hv.cpu().numpy()[good];out_j[gi,h]=hj.cpu().numpy()[good]
                 out_hrot[gi,h]=rot.cpu().numpy()[good];out_ht[gi,h]=delta.cpu().numpy()[good]
-            reports.append(dict(first=ix[0],last=ix[-1],frames=b,initial_loss=initial_loss,final_loss=float(final_loss),
+            reports.append(dict(first=core[0],last=core[-1],frames=len(core),left_context=prefix,
+                initial_loss=initial_loss,final_loss=float(final_loss),
                 pixel_objective=float(pixel),max_floor_residual_m=maxfloor))
-        print(f'JOINT {gno+1}/{len(groups)} frames={computed.sum()} loss={initial_loss:.4f}->{float(final_loss):.4f} floor={maxfloor:.4f} elapsed={time.monotonic()-started:.1f}',flush=True)
+        print(f'JOINT {gno+1}/{len(windows)} frames={computed.sum()} loss={initial_loss:.4f}->{float(final_loss):.4f} floor={maxfloor:.4f} elapsed={time.monotonic()-started:.1f}',flush=True)
     out_v.flush();out_b.flush()
     if direct:hand_valid &= computed[:,None]
     np.savez_compressed(a.output/'joint_params.npz',body_pose=output_aa[:,1:].reshape(n,69),global_orient=output_aa[:,0],
@@ -314,6 +408,8 @@ def solve(a):
         hand_initialization='direct_ace_and_stereo' if direct else 'cached_geometric_fit',
         body_initialization=manifest.get('body_initialization','cached_pose_parameter_seed'),
         hand_rejected_frames=rejected_hands,configuration=config,
+        continuity=dict(enabled=continuity,left_context=context,world_space_stability=stabilize,
+                        hand_link_max_s=.12,split_on_camera_reference=True),
         windows=reports,elapsed_s=time.monotonic()-started,source_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest())
     (a.output/'joint_manifest.json').write_text(json.dumps(report,indent=2),encoding='utf8')
     print('JOINT COMPLETE',report['optimized_frames'],flush=True)
@@ -327,5 +423,7 @@ def main():
     p.add_argument('--finger-prior',type=float,default=.3);p.add_argument('--temporal-weight',type=float,default=.15)
     p.add_argument('--body-prior',type=float,default=.1);p.add_argument('--body-temporal',type=float,default=.1)
     p.add_argument('--floor-weight',type=float,default=2500);p.add_argument('--orientation-weight',type=float,default=.01)
+    p.add_argument('--continuity-context',type=int,default=12);p.add_argument('--continuity-weight',type=float,default=.12)
+    p.add_argument('--stability-weight',type=float,default=.5,help='World-space body and hand curvature regularization; 0 restores previous objective')
     solve(p.parse_args())
 if __name__=='__main__':main()

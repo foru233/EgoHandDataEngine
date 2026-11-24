@@ -9,6 +9,7 @@ import sys
 import time
 
 from joint_work_paths import ACE, JOINT_WORK, MANO, PROJECT, SCRIPT_DIR
+from ace_prediction_cache import fingerprint, lookup, publish
 
 sys.path.insert(0, str(PROJECT / 'src'))
 from egohand.body.smpl_mount import DEFAULT_CAMERA_FOREHEAD_OFFSET_MM, camera_forehead_offset_m
@@ -21,7 +22,7 @@ def runtime_python(variable):
     value=os.environ.get(variable,sys.executable)
     found=shutil.which(value)
     if not found:raise FileNotFoundError(f'{variable}: Python interpreter not found')
-    return Path(found).resolve()
+    return Path(found).absolute()
 
 
 def main():
@@ -31,6 +32,7 @@ def main():
     parser.add_argument('--camera-forehead-offset-mm', type=float, default=DEFAULT_CAMERA_FOREHEAD_OFFSET_MM)
     parser.add_argument('--initial-camera-height-m', type=float, default=STANDING_FOREHEAD_HEIGHT_M)
     parser.add_argument('--iterations', type=int, default=150)
+    parser.add_argument('--no-ace-cache', action='store_true')
     args = parser.parse_args()
     recording, output = args.recording.resolve(), args.output.resolve()
     if output.exists():
@@ -77,9 +79,32 @@ def main():
         '--calibration', measurements / 'processing_calibration.yaml')
     run(sys.executable, 'prepare_recording_observations.py', '--source', measurements,
         '--input', video, '--recording', recording, '--output', observations)
-    run(ace_python, 'encode_windows.py', '--input', video, '--out', work / 'latents', '--window', 81, '--overlap', 0)
-    run(ace_python, 'infer_latents.py', '--latents', work / 'latents', '--out', work / 'ace')
-    run(ace_python, 'initialize_joint_hands.py', '--ace-run', work / 'ace',
+    ace_window=81
+    frame_count=json.loads((video/'manifest.json').read_text(encoding='utf8'))['frames']
+    cache_key=None
+    cached=None
+    if not args.no_ace_cache:
+        print('STAGE ace_prediction_cache.py',flush=True)
+        try:
+            cache_key=fingerprint(video,ace_python,ace_window)
+            cached=lookup(cache_key,frame_count,ace_window)
+        except (OSError,ValueError,KeyError,subprocess.CalledProcessError) as exc:
+            print(f'ACE CACHE BYPASS: {exc}',flush=True)
+    ace_predictions=cached or work/'ace'
+    if cached:
+        print('ACE CACHE HIT',cache_key,flush=True)
+    else:
+        run(ace_python, 'encode_windows.py', '--input', video, '--out', work / 'latents', '--window', ace_window, '--overlap', 0)
+        run(ace_python, 'infer_latents.py', '--latents', work / 'latents', '--out', ace_predictions)
+        if cache_key:
+            print('STAGE ace_prediction_cache.py',flush=True)
+            try:
+                if fingerprint(video,ace_python,ace_window)==cache_key:
+                    publish(ace_predictions,cache_key,frame_count,ace_window)
+                else:print('ACE CACHE BYPASS: inference inputs changed during the run',flush=True)
+            except (OSError,ValueError,KeyError,subprocess.CalledProcessError) as exc:
+                print(f'ACE CACHE BYPASS: {exc}',flush=True)
+    run(ace_python, 'initialize_joint_hands.py', '--ace-run', ace_predictions,
         '--observations', observations / 'observations.npz', '--output', hands)
     run(ace_python, 'joint_body_mano.py', '--seed', measurements, '--hands', hands, '--camera', camera,
         '--output', fit, '--iterations', args.iterations, '--temporal-weight', .35, '--finger-prior', .3,
@@ -95,6 +120,7 @@ def main():
     report = dict(status='completed', recording=str(recording), work=str(work), complete_reconstruction_passes=1,
                   initialization='neutral_smpl_and_ace_stereo', previous_reconstruction_required=False,
                   camera_observations=json.loads((measurements/'measurement_manifest.json').read_text(encoding='utf8')),
+                  ace_cache_reused=cached is not None, ace_cache_key=cache_key,
                   camera_forehead_offset_mm=args.camera_forehead_offset_mm,
                   initial_camera_height_m=args.initial_camera_height_m, standalone_fast_replay=True)
     with (output / 'pipeline.json').open('x', encoding='utf8') as stream:

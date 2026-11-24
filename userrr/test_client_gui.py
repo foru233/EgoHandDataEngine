@@ -13,19 +13,15 @@ def test_compact_toolbar_and_tiles_keep_controls_readable(qtbot):
     try:
         w.resize(900,620);w.show();qtbot.wait(150)
         assert not w._toolbar_wide
-        viewport=w.toolbar_scroll.viewport()
-        scrollbar=w.toolbar_scroll.horizontalScrollBar()
-        assert scrollbar.maximum()>0
-        mount=w.camera_mount_controls
-        assert mount.mapTo(viewport,QPoint(mount.width(),0)).x()<=viewport.width()
+        bounds=w.command_strip.rect()
+        assert len({group.y() for group in w.command_groups})>1
         for group in w.command_groups:
-            assert group.y()==w.compute_controls.y()
+            assert bounds.contains(group.geometry())
             for button in group.findChildren(QPushButton)+group.findChildren(QToolButton):
                 if button.isVisible() and button.text():
                     assert button.width() >= button.sizeHint().width()-2, button.text()
-        scrollbar.setValue(scrollbar.maximum())
-        assert w.stop_button.mapTo(viewport,QPoint(w.stop_button.width(),0)).x()<=viewport.width()
-        scrollbar.setValue(0)
+        for control in (w.camera_mount_controls,w.ground_controls,w.stop_button):
+            assert bounds.contains(control.mapTo(w.command_strip,QPoint(control.width()-1,control.height()-1)))
         assert w.raw_left_tile.geometry().bottom()+1 == w.raw_right_tile.geometry().top()
         assert w.raw_right_tile.geometry().bottom()+1 == w.depth_tile.geometry().top()
         assert w.left_tile.geometry().bottom()+1 == w.right_tile.geometry().top()
@@ -33,9 +29,9 @@ def test_compact_toolbar_and_tiles_keep_controls_readable(qtbot):
         assert w.result_output_parent is None
         w.resize(1920,900);qtbot.wait(100)
         assert w._toolbar_wide
-        assert scrollbar.maximum()==0
         record=w.record_controls.geometry();compute=w.compute_controls.geometry()
-        assert record.left()-compute.right()-1 == 0
+        assert w.fit_controls.geometry().left()>compute.right()
+        assert record.left()>w.fit_controls.geometry().right()
         assert record.height()==compute.height()
         assert record.top()==compute.top()
         assert {widget.height() for widget in (w.start_button,w.compute_button,w.view_menu_button,

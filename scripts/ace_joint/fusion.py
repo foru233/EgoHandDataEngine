@@ -32,7 +32,7 @@ def collect_sequence(root):
     start=manifest['start'];n=manifest['frames'];records=[[[] for _ in range(n)] for _ in range(2)]
     for clip in manifest['outputs']:
         view=['left','right'].index(clip['side']);a,b=clip['start'],clip['end']
-        with np.load(Path(clip['path'])/'raw_predictions.npz') as data:
+        with np.load(root/clip['path']/'raw_predictions.npz') as data:
             length=b-a
             arrays={key:data[key] for key in ('global_orient','hand_pose','betas','cam_trans','exists_2d','exists_3d')}
         if arrays['global_orient'].shape!=(length,2,3,3):raise ValueError('Raw ACE orientation shape changed')

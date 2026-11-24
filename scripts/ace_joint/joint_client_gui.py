@@ -4,7 +4,7 @@ import argparse,json,os,sqlite3,subprocess,sys,time
 from joint_work_paths import JOINT_WORK, PROJECT, SCRIPT_DIR
 sys.dont_write_bytecode=True;sys.path[:0]=[str(PROJECT/'src'),str(PROJECT/'userrr')]
 from PySide6.QtCore import Qt,QTimer,QCoreApplication,QEvent
-from PySide6.QtWidgets import QApplication,QComboBox,QStyle,QStyleOptionSlider
+from PySide6.QtWidgets import QApplication,QComboBox,QInputDialog,QStyle,QStyleOptionSlider
 from client_gui import ClientMainWindow as OriginalWindow
 import client_gui
 from shared_replay_cache import SharedSavedResultReplay
@@ -15,7 +15,13 @@ from egohand.vio.local_segments import display_reference_key
 client_gui.SavedResultReplay=SharedSavedResultReplay
 client_gui.load_recorded_results=load_joint_results
 DEFAULT_RESULT_PARENT=PROJECT/'data'
-REGISTRY=JOINT_WORK/'gui_algorithm_registry.json'
+REGISTRY=Path(os.environ.get('EGOHAND_JOINT_REGISTRY',JOINT_WORK/'gui_algorithm_registry.json')).expanduser().resolve()
+
+def read_metadata(path):
+    try:
+        value=json.loads(path.read_text(encoding='utf8'))
+        return value if isinstance(value,dict) else {}
+    except (OSError,ValueError):return {}
 
 def configure_view(window):
     indexed=isinstance(window.saved,IndexedResults)
@@ -25,6 +31,11 @@ def configure_view(window):
     if candidates:
         window.result_slider.setValue(candidates[0])
         window.pivot_choice.setCurrentIndex(window.pivot_choice.findData('body'))
+        if window._joint_loaded:
+            # Center the body once. Following its pelvis every frame also moves
+            # the apparent camera, amplifying small errors in the fitted pose.
+            window._update_view_pivot()
+            window.pivot_choice.setCurrentIndex(window.pivot_choice.findData('free'))
         window.preview.setCameraPosition(distance=3.2)
 
 class JointClientWindow(OriginalWindow):
@@ -50,7 +61,7 @@ class JointClientWindow(OriginalWindow):
         row.insertWidget(algorithm_index,self.reconstruction_algorithm)
         self.view_algorithm_button=self._button('查看所选结果',self.open_selected_algorithm)
         self.view_algorithm_button.setFixedHeight(32)
-        row.insertWidget(row.indexOf(self.camera_mount_controls),self.view_algorithm_button)
+        row.addWidget(self.view_algorithm_button)
         self.algorithm_note=client_gui.CompactLabel('离线处理 · 人体未观测部分由先验推断')
         self.algorithm_note.setObjectName('compactMeta')
         self.header_layout.insertWidget(self.header_layout.indexOf(self.state_label),self.algorithm_note,1)
@@ -59,8 +70,7 @@ class JointClientWindow(OriginalWindow):
         self.sync_controls()
 
     def _registry(self):
-        try:return json.loads(REGISTRY.read_text(encoding='utf8'))
-        except (OSError,ValueError):return {}
+        return read_metadata(REGISTRY)
 
     def _register(self,algorithm,path,recording):
         REGISTRY.parent.mkdir(parents=True,exist_ok=True)
@@ -68,15 +78,55 @@ class JointClientWindow(OriginalWindow):
         registry.setdefault(key,{})[algorithm]=str(path)
         temporary=REGISTRY.with_suffix('.tmp');temporary.write_text(json.dumps(registry,ensure_ascii=False,indent=2),encoding='utf8');temporary.replace(REGISTRY)
 
+    def available_results(self,recording,algorithm):
+        record_key=str(Path(recording).resolve()).casefold()
+        saved=self._registry().get(record_key,{})
+        registered=saved.get(algorithm)
+        candidates={}
+        for parent in {Path(self.result_output_parent),DEFAULT_RESULT_PARENT}:
+            if not parent.is_dir():continue
+            for entry in parent.iterdir():
+                if not entry.is_dir() or not (entry/'unified_smpl_manifest.json').is_file():continue
+                entry=entry.resolve()
+                metadata=read_metadata(entry/'pipeline.json') or read_metadata(entry/'reprocessing.json')
+                source=metadata.get('recording') or metadata.get('original_recording')
+                if isinstance(source,str) and str(Path(source).resolve()).casefold()==record_key:
+                    candidates[entry]=False
+        if registered:candidates[Path(registered).resolve()]=True
+        available=[]
+        for entry,is_registered in candidates.items():
+            model=read_metadata(entry/'unified_smpl_manifest.json')
+            if model.get('status')!='completed' or not (entry/'results/frames.jsonl').is_file():continue
+            actual='joint_smpl_mano_v2' if model.get('algorithm')=='joint_smpl_mano_v2' else 'legacy'
+            if actual!=algorithm:continue
+            if actual=='joint_smpl_mano_v2':
+                pipeline=read_metadata(entry/'pipeline.json')
+                if pipeline.get('status')!='completed' or not pipeline.get('standalone_fast_replay'):continue
+                if not all((entry/name).is_file() for name in
+                           ('display_cache.sqlite3','depth_results.sqlite3','joint_pose_index.npz')):continue
+            available.append((is_registered,(entry/'unified_smpl_manifest.json').stat().st_mtime_ns,entry))
+        return [entry for _,_,entry in sorted(available,reverse=True)]
+
     def open_selected_algorithm(self):
         if self._joint_job is not None:return
         recording=self.recording_source
         if not recording:
             self.show_error('请先打开录制目录，或使用“查看计算结果”直接打开结果。');return
-        path=self._registry().get(str(Path(recording).resolve()).casefold(),{}).get(self.reconstruction_algorithm.currentData())
-        if not path or not Path(path).exists():
+        paths=self.available_results(recording,self.reconstruction_algorithm.currentData())
+        if not paths:
             self.show_error('所选算法尚无完成结果，请点击“计算”。');return
-        self.open_results_path(Path(path));configure_view(self)
+        selected=paths[0]
+        if len(paths)>1:
+            labels={}
+            for entry in paths:
+                continuity=read_metadata(entry/'joint_manifest.json').get('continuity',{})
+                suffix=' · 抖动修复' if continuity.get('world_space_stability') else ' · 连续性修复' if continuity.get('enabled') else ''
+                label=f'{entry.name}{suffix} · {entry.parent}'
+                labels[label]=entry
+            choice,accepted=QInputDialog.getItem(self,'查看所选结果','选择已完成的结果：',list(labels),0,False)
+            if not accepted:return
+            selected=labels[choice]
+        self.open_results_path(selected);configure_view(self)
 
     def open_results_path(self,path):
         try:
@@ -86,7 +136,10 @@ class JointClientWindow(OriginalWindow):
         self._ground_override=False
         super().open_results_path(path)
         if hasattr(self,'reconstruction_algorithm'):
-            self.algorithm_note.setText('当前结果：人体手部联合 · 无显示前腕部平移' if self._joint_loaded else '当前结果：旧算法 · 双目骨架与 MANO')
+            continuity=read_metadata(Path(path)/'joint_manifest.json').get('continuity',{})
+            suffix=' · 抖动修复' if continuity.get('world_space_stability') else ' · 连续性修复' if continuity.get('enabled') else ''
+            self.algorithm_note.setText('当前结果：人体手部联合'+suffix
+                                       if self._joint_loaded else '当前结果：旧算法 · 双目骨架与 MANO')
         self.sync_controls()
 
     def _request_smpl(self,result):
@@ -224,7 +277,7 @@ class JointClientWindow(OriginalWindow):
                 text=self._joint_log.read_text(encoding='utf8',errors='replace')
                 stages={'extract_joint_measurements.py':'从录制提取相机轨迹和双目观测',
                     'prepare_neutral_joint_seed.py':'初始化中立人体','export_recording.py':'准备双目图像',
-                    'prepare_recording_observations.py':'准备二维观测','encode_windows.py':'ACE 视频编码',
+                    'prepare_recording_observations.py':'准备二维观测','ace_prediction_cache.py':'校验 ACE 缓存','encode_windows.py':'ACE 视频编码',
                     'infer_latents.py':'ACE 姿态推理','initialize_joint_hands.py':'准备手部初值',
                     'joint_body_mano.py':'人体与手部联合拟合','package_joint_replay.py':'导出回放数据',
                     'build_saved_replay_cache.py':'准备原始图像缓存','build_joint_fast_replay.py':'预计算回放缓存'}
@@ -279,9 +332,11 @@ class JointClientWindow(OriginalWindow):
         return super().stop_pipeline()
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('--open-results',type=Path);p.add_argument('--quit-after',type=float);a=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument('--open-results',type=Path);p.add_argument('--quit-after',type=float)
+    p.add_argument('--recording',type=Path);a=p.parse_args()
     os.chdir(PROJECT);QCoreApplication.setAttribute(Qt.AA_ShareOpenGLContexts)
-    app=QApplication(sys.argv[:1]);app.setStyle('Fusion');window=JointClientWindow();window.show()
+    app=QApplication(sys.argv[:1]);app.setStyle('Fusion');window=JointClientWindow();window.showMaximized()
+    if a.recording:window.select_recording(a.recording.resolve())
     if a.open_results and a.open_results.exists():window.open_results_path(a.open_results);QTimer.singleShot(500,lambda:configure_view(window))
     if a.quit_after:QTimer.singleShot(int(a.quit_after*1000),window.close)
     return app.exec() or int(bool(getattr(window,'last_error',None)))

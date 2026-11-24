@@ -47,7 +47,7 @@ def main(*, on_window=None):
     window=module.ClientMainWindow(recovery_profile=profile,live_recovery_profile=live_profile,replay_output_dir=args.output_dir)
     if on_window:on_window(window)
     print(f'[EgoHand DELIVERY] {client_path} -> {type(window).__name__}',flush=True)
-    window.show()
+    window.showMaximized()
     if args.recording:window.select_recording(args.recording)
     if args.open_results:window.open_results_path(args.open_results)
     if args.exit_when_finished:

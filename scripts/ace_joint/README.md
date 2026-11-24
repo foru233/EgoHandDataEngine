@@ -27,3 +27,5 @@ $env:EGOHAND_JOINT_BODY_PYTHON = 'C:\path\to\body-env\python.exe'
 ~~~
 
 完成标志是输出目录的 `pipeline.json`，其中记录重建次数和快载状态。存在 `display_cache.sqlite3`、`depth_results.sqlite3` 和 `joint_pose_index.npz` 时，本入口会直接回放预计算数据。网格只在通过定位和几何检查的帧发布。重投影误差是对输入像素的一致性指标，不能替代三维真值。
+
+首次计算会保存完整的左右目 ACE 预测缓存。以后对同一输入调整拟合参数时，校验视频、标定与帧索引、模型、推理代码和环境版本；完全匹配才跳过 ACE 编码和推理。双目观测、联合拟合和快载仍按本次计算生成。命令行可用 `--no-ace-cache` 强制重新推理，输出的 `pipeline.json` 会标明本次是否命中缓存。
